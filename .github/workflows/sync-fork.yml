@@ -1,0 +1,23 @@
+name: Sync fork
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Fast-forward only: if the fork's main has diverged, this fails
+      # instead of overwriting the team's commits.
+      - name: Push main to pure11-GmbH/VisualClaude
+        run: |
+          git push "https://x-access-token:${{ secrets.FORK_SYNC_TOKEN }}@github.com/pure11-GmbH/VisualClaude.git" main:main
