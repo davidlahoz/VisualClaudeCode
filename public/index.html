@@ -25,6 +25,9 @@ header .logo span{color:var(--accent)}
 #conn{font-size:12px;color:var(--dim)}
 #conn.live{color:var(--green)}
 #conn.dead{color:var(--red)}
+#saved{font-size:12px;color:var(--green);opacity:0;transition:opacity .8s;
+  white-space:nowrap;pointer-events:none}
+#saved.show{opacity:.75}
 #burger{display:none;background:none;border:1px solid var(--border);color:var(--fg);
   border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
 main{flex:1;display:flex;min-height:0}
@@ -128,6 +131,7 @@ main{flex:1;display:flex;min-height:0}
   <button id="burger">☰</button>
   <div class="logo"><span>*</span> VisualClaudeCode</div>
   <div id="conn">no session</div>
+  <span id="saved">✓ sessions saved</span>
   <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
     <span id="who" style="color:var(--dim);font-size:12px"></span>
     <button id="secbtn" class="hbtn">security</button>
@@ -236,6 +240,20 @@ main{flex:1;display:flex;min-height:0}
         <button class="act" id="ni-btn">+ New invite code</button>
       </div>
     </div>
+    <div>
+      <h4>Session persistence</h4>
+      <div class="row" style="align-items:center">
+        <label>save every
+          <input id="ps-int" type="number" min="0" max="1440"
+            style="width:64px;flex:none;padding:3px 6px"> min</label>
+        <button class="act" id="ps-apply">Apply</button>
+        <span id="ps-last" style="color:var(--dim);font-size:12px"></span>
+      </div>
+      <p style="font-size:12px;color:var(--dim);margin:6px 0 0">
+        Live sessions are snapshotted on this schedule and recreated after a
+        reboot, resuming each conversation (<code>claude --continue</code>).
+        0 turns saving off.</p>
+    </div>
     <div id="adminerr" class="perr"></div>
   </div>
 </div>
@@ -249,6 +267,23 @@ const $ = s => document.querySelector(s);
 let term = null, fit = null, ws = null, current = null, reconnectTimer = null;
 
 function setConn(txt, cls){ const c=$("#conn"); c.textContent=txt; c.className=cls||""; }
+
+/* ---------------- persistence indicator ---------------- */
+let lastSave = null, savedTimer = null;
+async function pollSaved(){
+  try{
+    const r = await fetch("/api/persist");
+    if(!r.ok) return;
+    const p = await r.json();
+    if(lastSave !== null && p.last_save > lastSave){
+      const el = $("#saved");
+      el.classList.add("show");
+      clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => el.classList.remove("show"), 4000);
+    }
+    lastSave = p.last_save;
+  }catch(e){}
+}
 
 /* ---------------- session list ---------------- */
 async function refresh(){
@@ -418,6 +453,11 @@ async function adminRefresh(){
   if(window.CFMODE){
     document.querySelectorAll(".localonly").forEach(e => e.style.display = "none");
   }
+  const persist = await adminApi("GET","/api/persist");
+  if(document.activeElement !== $("#ps-int")) $("#ps-int").value = persist.interval_min;
+  $("#ps-last").textContent = persist.last_save
+    ? "last saved " + new Date(persist.last_save*1000).toLocaleTimeString()
+    : "never saved";
   const ur = $("#userrows"); ur.innerHTML = "";
   for(const u of users){
     const tr = document.createElement("div");
@@ -511,6 +551,11 @@ $("#nu-btn").onclick = async () => {
   adminRefresh();
 };
 $("#ni-btn").onclick = async () => { await adminApi("POST","/api/invites"); adminRefresh(); };
+$("#ps-apply").onclick = async () => {
+  await adminApi("PATCH","/api/persist",
+    {interval_min: parseInt($("#ps-int").value || "0", 10)});
+  adminRefresh();
+};
 
 /* ---------------- security panel (2FA) ---------------- */
 async function secApi(method, path, body){
@@ -596,8 +641,8 @@ syncViewport();
 $("#kbdbtn").onclick = ev => { ev.preventDefault(); term && term.focus(); };
 $("#term").addEventListener("touchend", () => term && term.focus());
 
-refresh();
-setInterval(refresh, 5000);
+refresh(); pollSaved();
+setInterval(() => { refresh(); pollSaved(); }, 5000);
 window.addEventListener("beforeunload", () => { if(ws) ws.close(); });
 </script>
 </body>

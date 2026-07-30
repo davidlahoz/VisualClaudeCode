@@ -369,6 +369,104 @@ def cleanup_session(target: str) -> bool:
     return True
 
 
+# ------------------------------------------------------- session persistence
+# tmux sessions die with the host on reboot. A background task periodically
+# snapshots which vc-* sessions are alive; on startup any session in the last
+# snapshot that no longer exists is recreated from its stored restore command
+# (the original launch command with --continue added, so the Claude Code
+# conversation resumes where it left off).
+SETTINGS_FILE = BASE / "settings.json"
+RESURRECT_FILE = BASE / "resurrect.json"
+DEFAULT_SAVE_MIN = 5
+
+_last_save = 0
+
+
+def load_settings() -> dict:
+    if SETTINGS_FILE.exists():
+        try:
+            return json.loads(SETTINGS_FILE.read_text())
+        except ValueError:
+            return {}
+    return {}
+
+
+def save_settings(settings: dict):
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+
+def save_interval_min() -> int:
+    try:
+        return max(0, min(1440, int(
+            load_settings().get("save_interval_min", DEFAULT_SAVE_MIN))))
+    except (TypeError, ValueError):
+        return DEFAULT_SAVE_MIN
+
+
+def live_targets() -> list:
+    out = tmux("list-sessions", "-F", "#{session_name}")
+    return [s for s in out.stdout.splitlines() if s.startswith(PREFIX)]
+
+
+def session_options(target: str):
+    tmux("set-option", "-t", target, "status", "off")
+    tmux("set-option", "-t", target, "window-size", "latest")
+    tmux("set-option", "-t", target, "history-limit", "10000")
+
+
+def snapshot_sessions():
+    global _last_save
+    now = int(time.time())
+    tmp = RESURRECT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(
+        {"saved_at": now, "sessions": live_targets()}, indent=2))
+    os.replace(tmp, RESURRECT_FILE)
+    _last_save = now
+
+
+def restore_session(target: str, info: dict) -> bool:
+    """Recreate a dead tmux session, resuming its claude conversation."""
+    cmd = info.get("restore_cmd")
+    if info.get("sandbox"):
+        if not cmd:
+            return False  # pre-persistence session; container cmd unknown
+        subprocess.run(["docker", "rm", "-f", target], capture_output=True)
+        r = tmux("new-session", "-d", "-s", target, "-x", "200", "-y", "50",
+                 cmd)
+    else:
+        cwd = info.get("cwd", "")
+        if not cwd or not Path(cwd).is_dir():
+            return False
+        r = tmux("new-session", "-d", "-s", target, "-c", cwd,
+                 "-x", "200", "-y", "50",
+                 cmd or "claude --continue ; exec bash")
+    if r.returncode != 0:
+        return False
+    session_options(target)
+    return True
+
+
+def restore_sessions() -> int:
+    if not RESURRECT_FILE.exists():
+        return 0
+    try:
+        saved = json.loads(RESURRECT_FILE.read_text()).get("sessions", [])
+    except ValueError:
+        return 0
+    meta = load_meta()
+    alive = set(live_targets())
+    return sum(1 for t in saved
+               if t not in alive and t in meta and restore_session(t, meta[t]))
+
+
+async def persist_loop():
+    while True:
+        await asyncio.sleep(15)
+        interval = save_interval_min()
+        if interval and time.time() - _last_save >= interval * 60:
+            await asyncio.to_thread(snapshot_sessions)
+
+
 # ------------------------------------------------------------------ 2FA: TOTP
 def hotp(key: bytes, counter: int) -> str:
     digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
@@ -939,6 +1037,7 @@ async def admin_delete_user(request):
         if sess.startswith(f"{PREFIX}{name}--"):
             tmux("kill-session", "-t", "=" + sess)
             cleanup_session(sess)
+    snapshot_sessions()
     return web.json_response({"ok": True})
 
 
@@ -972,6 +1071,26 @@ async def admin_delete_invite(request):
     del invites[code]
     save_invites(invites)
     return web.json_response({"ok": True})
+
+
+async def persist_status(request):
+    return web.json_response({
+        "interval_min": save_interval_min(),
+        "last_save": _last_save,
+    })
+
+
+async def persist_update(request):
+    require_admin(request)
+    body = await request.json()
+    try:
+        interval = max(0, min(1440, int(body.get("interval_min", 0))))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="interval_min must be a number")
+    settings = load_settings()
+    settings["save_interval_min"] = interval
+    save_settings(settings)
+    return web.json_response({"ok": True, "interval_min": interval})
 
 
 async def list_sessions(request):
@@ -1020,13 +1139,18 @@ async def create_session(request):
                 text=f"session limit reached ({prefs['max_sessions']}) — "
                      "delete a session first")
 
-    claude_cmd = "claude"
+    base_cmd = "claude"
     if prefs["model"]:
-        claude_cmd += f" --model {shlex.quote(prefs['model'])}"
-    if extra:
-        claude_cmd += " " + " ".join(shlex.quote(a) for a in shlex.split(extra))
+        base_cmd += f" --model {shlex.quote(prefs['model'])}"
+    tokens = shlex.split(extra) if extra else []
+    if tokens:
+        base_cmd += " " + " ".join(shlex.quote(a) for a in tokens)
     # If claude exits, drop to a shell instead of killing the session.
-    claude_cmd += " ; exec bash"
+    claude_cmd = base_cmd + " ; exec bash"
+    # after a reboot the session is recreated resuming the same conversation
+    resumes = {"--continue", "-c", "--resume", "-r"}
+    restore_cmd = (base_cmd if resumes & set(tokens)
+                   else base_cmd + " --continue") + " ; exec bash"
 
     target = user_target(user, name)
     if tmux("has-session", "-t", "=" + target).returncode == 0:
@@ -1069,6 +1193,8 @@ async def create_session(request):
             "bash", "-c", claude_cmd,
         ]
         cmd = " ".join(shlex.quote(a) for a in docker)
+        restore_cmd = " ".join(shlex.quote(a)
+                               for a in docker[:-1] + [restore_cmd])
         cwd = str(sub)  # shown in the session list
         r = tmux("new-session", "-d", "-s", target,
                  "-x", "200", "-y", "50", cmd)
@@ -1090,12 +1216,12 @@ async def create_session(request):
                  "-x", "200", "-y", "50", claude_cmd)
     if r.returncode != 0:
         raise web.HTTPInternalServerError(text=r.stderr.strip() or "tmux failed")
+    session_info["restore_cmd"] = restore_cmd
     meta = load_meta()
     meta[target] = session_info
     save_meta(meta)
-    tmux("set-option", "-t", target, "status", "off")
-    tmux("set-option", "-t", target, "window-size", "latest")
-    tmux("set-option", "-t", target, "history-limit", "10000")
+    session_options(target)
+    snapshot_sessions()
     return web.json_response({"name": name}, status=201)
 
 
@@ -1108,6 +1234,7 @@ async def kill_session(request):
     if r.returncode != 0:
         raise web.HTTPNotFound(text=r.stderr.strip() or "no such session")
     files_deleted = cleanup_session(target)
+    snapshot_sessions()
     return web.json_response({"ok": True, "files_deleted": files_deleted})
 
 
@@ -1224,8 +1351,24 @@ async def index(request):
     return web.FileResponse(BASE / "public" / "index.html")
 
 
+async def persist_startup(app):
+    restored = await asyncio.to_thread(restore_sessions)
+    if restored:
+        print(f"restored {restored} tmux session(s) from last snapshot",
+              flush=True)
+    await asyncio.to_thread(snapshot_sessions)
+    app["persist_task"] = asyncio.create_task(persist_loop())
+
+
+async def persist_cleanup(app):
+    app["persist_task"].cancel()
+    snapshot_sessions()  # final snapshot on graceful stop
+
+
 def main():
     app = web.Application(middlewares=[auth_middleware])
+    app.on_startup.append(persist_startup)
+    app.on_cleanup.append(persist_cleanup)
     app.router.add_get("/", index)
     app.router.add_get("/login", login_get)
     app.router.add_post("/login", login_post)
@@ -1249,6 +1392,8 @@ def main():
     app.router.add_get("/api/invites", admin_list_invites)
     app.router.add_post("/api/invites", admin_create_invite)
     app.router.add_delete("/api/invites/{code}", admin_delete_invite)
+    app.router.add_get("/api/persist", persist_status)
+    app.router.add_patch("/api/persist", persist_update)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_delete("/api/sessions/{name}", kill_session)

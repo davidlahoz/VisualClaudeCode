@@ -86,6 +86,21 @@ provisioning needs this script.
 - Sessions are normal tmux sessions: `tmux attach -t vc-<name>` from SSH works
   too, and both views stay in sync.
 
+## Reboot persistence
+
+tmux sessions die with the host, so the server snapshots the list of live
+sessions (`resurrect.json`) on a schedule and on every create/kill/shutdown.
+On startup, any session from the last snapshot that no longer exists is
+recreated with its original launch command plus `--continue`, so the Claude
+Code conversation resumes where it left off (Claude Code keeps transcripts on
+disk per directory). Sandboxed sessions are restored the same way, including
+their docker wrapper. A brief "✓ sessions saved" appears in the menu bar each
+time a snapshot lands.
+
+The interval is set in the admin panel (**Session persistence**, default 5
+min, 0 = off) and stored in `settings.json`. Terminal scrollback is not
+restored — only the session, its directory, and its conversation.
+
 ## Service
 
 Runs as systemd unit `visualclaude.service` (enabled at boot):
