@@ -317,16 +317,19 @@ details button{background:#26241e;color:#e8e2d5;border:1px solid #3d3a30}
 <button>Sign in</button><p class=err>__ERR__</p></form>
 <details __OPEN__><summary>Create account</summary>
 <form method=post action=/register>
-<input name=invite type=password placeholder="invite code" autocomplete=off>
+<input name=invite type=password placeholder="invite code" autocomplete=off value="__INV__">
 <input name=user placeholder="username (a-z 0-9 - _)" autocomplete=username>
 <input name=password type=password placeholder="password (min 8 chars)" autocomplete=new-password>
 <button>Register</button><p class=err>__RERR__</p></form></details>
 </main></body></html>"""
 
 
-def login_page(err="", rerr="", status=200):
+def login_page(err="", rerr="", status=200, invite=""):
+    if not all(c.isalnum() or c in "-_" for c in invite):
+        invite = ""
     html = (LOGIN_HTML.replace("__ERR__", err).replace("__RERR__", rerr)
-            .replace("__OPEN__", "open" if rerr else ""))
+            .replace("__INV__", invite)
+            .replace("__OPEN__", "open" if (rerr or invite) else ""))
     return web.Response(text=html, content_type="text/html", status=status)
 
 
@@ -339,7 +342,7 @@ def session_response(user: str) -> web.Response:
 
 
 async def login_get(request):
-    return login_page()
+    return login_page(invite=request.query.get("invite", ""))
 
 
 def sign_pre(user: str, exp: int) -> str:
