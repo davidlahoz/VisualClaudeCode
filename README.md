@@ -90,3 +90,8 @@ with vendored xterm.js in `public/vendor/`. Host/port overridable via
   `users.json` and re-register.
 - Anyone with the token effectively has shell access as root (Claude sessions
   drop to bash on exit) — treat the token like an SSH key.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Vendored frontend libraries (xterm.js,
+qrcodejs) are MIT-licensed by their respective authors.
