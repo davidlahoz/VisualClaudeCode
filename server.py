@@ -282,6 +282,13 @@ async def auth_middleware(request, handler):
             raise web.HTTPUnauthorized(text="unauthorized")
         raise web.HTTPFound("/login")
     request["user"] = user
+    # admin-mandated 2FA: until enrolled, only the security endpoints work
+    if path.startswith(("/api/", "/ws/")) \
+            and not path.startswith(("/api/me", "/api/2fa")):
+        rec = load_users().get(user) or {}
+        if rec.get("require_2fa") and not has_second_factor(rec):
+            raise web.HTTPForbidden(
+                text="2FA setup is required for your account")
     return await handler(request)
 
 
@@ -535,11 +542,16 @@ async def logout_post(request):
 # ---------------------------------------------------------------- session api
 async def me(request):
     users = load_users()
+    rec = users.get(request["user"]) or {}
     prefs = user_prefs(users, request["user"])
-    return web.json_response({"user": request["user"],
-                              "admin": is_admin(request["user"]),
-                              "allow_args": prefs["allow_args"],
-                              "sandbox": prefs["sandbox"]})
+    return web.json_response({
+        "user": request["user"],
+        "admin": is_admin(request["user"]),
+        "allow_args": prefs["allow_args"],
+        "sandbox": prefs["sandbox"],
+        "must_enroll_2fa": bool(rec.get("require_2fa"))
+                           and not has_second_factor(rec),
+    })
 
 
 # ------------------------------------------------------------- 2fa self-service
@@ -659,7 +671,9 @@ async def admin_list_users(request):
          "admin": bool(rec.get("admin")),
          "model": rec.get("model") or "",
          "allow_args": bool(rec.get("allow_args")),
-         "sandbox": bool(rec.get("sandbox"))}
+         "sandbox": bool(rec.get("sandbox")),
+         "require_2fa": bool(rec.get("require_2fa")),
+         "has_2fa": has_second_factor(rec)}
         for u, rec in sorted(users.items())
     ])
 
@@ -681,6 +695,8 @@ async def admin_update_user(request):
         users[name]["allow_args"] = bool(body["allow_args"])
     if "sandbox" in body:
         users[name]["sandbox"] = bool(body["sandbox"])
+    if "require_2fa" in body:
+        users[name]["require_2fa"] = bool(body["require_2fa"])
     if body.get("reset_2fa"):  # lockout recovery
         for k in ("totp", "totp_pending", "webauthn"):
             users[name].pop(k, None)

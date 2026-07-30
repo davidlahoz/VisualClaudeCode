@@ -23,7 +23,10 @@ xterm.js) that attaches/detaches.
 - **2FA** (optional, per user, via the "security" button): authenticator-app
   TOTP codes (QR enrollment) and/or WebAuthn hardware keys / passkeys. With
   any factor enrolled, login becomes password → second step (code or key).
-  Admins can strip a locked-out user's factors with "reset 2FA".
+  Admins can strip a locked-out user's factors with "reset 2FA", and can
+  check "2FA" on a user to make enrollment mandatory: until that user adds a
+  factor, the API serves them nothing but the security endpoints and the UI
+  pins them in the enrollment panel.
 
 ## Per-user restrictions (admin panel)
 
