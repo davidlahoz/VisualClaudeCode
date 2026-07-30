@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>VisualClaude</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+:root{
+  --bg:#1a1915; --bg2:#211f1a; --panel:#26241e; --border:#3d3a30;
+  --fg:#e8e2d5; --dim:#8a8578; --accent:#d97757; --green:#7fa661; --red:#e0655a;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;overscroll-behavior:none}
+body{background:var(--bg);color:var(--fg);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;
+  display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;padding:8px 14px;
+  border-bottom:1px solid var(--border);background:var(--bg2);flex:none}
+header .logo{font-weight:700}
+header .logo span{color:var(--accent)}
+#conn{font-size:12px;color:var(--dim)}
+#conn.live{color:var(--green)}
+#conn.dead{color:var(--red)}
+#burger{display:none;background:none;border:1px solid var(--border);color:var(--fg);
+  border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer}
+main{flex:1;display:flex;min-height:0}
+/* sidebar */
+#side{width:230px;flex:none;background:var(--bg2);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;min-height:0}
+#side h2{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);
+  margin:12px 14px 6px}
+#sessions{flex:1;overflow-y:auto;padding:0 8px}
+.sess{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;
+  cursor:pointer;margin-bottom:2px}
+.sess:hover{background:var(--panel)}
+.sess.active{background:var(--panel);outline:1px solid var(--border)}
+.sess .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none}
+.sess.attached .dot{background:var(--green)}
+.sess .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess .x{color:var(--dim);border:none;background:none;cursor:pointer;font:inherit;
+  padding:0 2px;border-radius:4px}
+.sess .x:hover{color:var(--red)}
+#newform{padding:10px;border-top:1px solid var(--border);display:flex;
+  flex-direction:column;gap:6px}
+#newform input{background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;width:100%}
+#newform input:focus{outline:none;border-color:var(--accent)}
+#newform button{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
+  padding:8px;font:inherit;font-weight:600;cursor:pointer}
+#newform button:hover{filter:brightness(1.1)}
+#newerr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
+/* terminal area */
+#termwrap{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#term{flex:1;min-height:0;padding:6px 0 0 8px;background:var(--bg)}
+#term .xterm{height:100%}
+#placeholder{flex:1;display:flex;align-items:center;justify-content:center;
+  color:var(--dim);text-align:center;padding:20px;line-height:1.7}
+/* quick keys */
+#keys{flex:none;display:flex;gap:6px;padding:6px 8px;overflow-x:auto;
+  background:var(--bg2);border-top:1px solid var(--border);
+  padding-bottom:calc(6px + env(safe-area-inset-bottom))}
+#keys button{flex:none;background:var(--panel);border:1px solid var(--border);
+  color:var(--fg);border-radius:6px;padding:6px 11px;font:inherit;font-size:12px;
+  cursor:pointer;touch-action:manipulation}
+#keys button:active{background:var(--accent);color:#1a1915}
+@media(max-width:760px){
+  #burger{display:block}
+  #side{position:fixed;z-index:20;top:41px;bottom:0;left:0;transform:translateX(-100%);
+    transition:transform .18s;box-shadow:4px 0 20px rgba(0,0,0,.5)}
+  #side.open{transform:none}
+}
+</style>
+</head>
+<body>
+<header>
+  <button id="burger">☰</button>
+  <div class="logo"><span>*</span> VisualClaude</div>
+  <div id="conn">no session</div>
+</header>
+<main>
+  <nav id="side">
+    <h2>Sessions</h2>
+    <div id="sessions"></div>
+    <form id="newform">
+      <input id="f-name" placeholder="name (e.g. myproject)" autocomplete="off">
+      <input id="f-cwd" placeholder="directory (created if missing, default ~)" autocomplete="off">
+      <input id="f-args" placeholder="claude args (e.g. --continue)" autocomplete="off">
+      <button>+ New session</button>
+      <div id="newerr"></div>
+    </form>
+  </nav>
+  <section id="termwrap">
+    <div id="placeholder">no session selected<br>
+      <small>create one on the left — it runs <b>claude</b> inside tmux<br>
+      and survives closing this page</small></div>
+    <div id="term" style="display:none"></div>
+    <div id="keys" style="display:none">
+      <button data-k="&#27;">Esc</button>
+      <button data-k="&#9;">Tab</button>
+      <button data-k="&#27;[Z">S-Tab</button>
+      <button data-k="&#3;">^C</button>
+      <button data-k="&#13;">Enter</button>
+      <button data-k="&#27;[A">↑</button>
+      <button data-k="&#27;[B">↓</button>
+      <button data-k="&#27;[D">←</button>
+      <button data-k="&#27;[C">→</button>
+      <button data-k="/">/</button>
+      <button id="pastebtn">Paste</button>
+    </div>
+  </section>
+</main>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/addon-weblinks.js"></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+let term = null, fit = null, ws = null, current = null, reconnectTimer = null;
+
+function setConn(txt, cls){ const c=$("#conn"); c.textContent=txt; c.className=cls||""; }
+
+/* ---------------- session list ---------------- */
+async function refresh(){
+  try{
+    const r = await fetch("/api/sessions");
+    if(r.status===401){ location.href="/login"; return; }
+    const list = await r.json();
+    const box = $("#sessions"); box.innerHTML="";
+    for(const s of list){
+      const div = document.createElement("div");
+      div.className = "sess"+(s.attached?" attached":"")+(s.name===current?" active":"");
+      div.innerHTML = `<span class="dot"></span><span class="nm"></span>
+        <button class="x" title="kill session">✕</button>`;
+      div.querySelector(".nm").textContent = s.name;
+      div.title = s.path;
+      div.onclick = () => { attach(s.name); closeSide(); };
+      div.querySelector(".x").onclick = async ev => {
+        ev.stopPropagation();
+        if(!confirm(`Kill session "${s.name}"? The Claude conversation stays resumable via --continue in that directory.`)) return;
+        await fetch("/api/sessions/"+encodeURIComponent(s.name), {method:"DELETE"});
+        if(current===s.name) detach();
+        refresh();
+      };
+      box.appendChild(div);
+    }
+    if(!list.length) box.innerHTML = '<div style="color:var(--dim);padding:8px 10px;font-size:13px">none yet</div>';
+  }catch(e){}
+}
+
+$("#newform").onsubmit = async ev => {
+  ev.preventDefault();
+  $("#newerr").textContent = "";
+  const name = $("#f-name").value.trim() || "claude-" + Math.random().toString(36).slice(2,6);
+  const body = { name, cwd: $("#f-cwd").value.trim(), args: $("#f-args").value.trim() };
+  const r = await fetch("/api/sessions", {method:"POST",
+    headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
+  if(!r.ok){ $("#newerr").textContent = await r.text(); return; }
+  $("#f-name").value = ""; $("#f-args").value = "";
+  await refresh();
+  attach(name); closeSide();
+};
+
+/* ---------------- terminal ---------------- */
+function ensureTerm(){
+  if(term) return;
+  term = new Terminal({
+    fontSize: 13.5,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    cursorBlink: true,
+    scrollback: 4000,
+    allowProposedApi: true,
+    theme: { background:"#1a1915", foreground:"#e8e2d5", cursor:"#d97757",
+             selectionBackground:"#3d3a30" }
+  });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  term.open($("#term"));
+  term.onData(d => { if(ws && ws.readyState===1) ws.send(JSON.stringify({type:"input",data:d})); });
+  term.onResize(({cols,rows}) => {
+    if(ws && ws.readyState===1) ws.send(JSON.stringify({type:"resize",cols,rows}));
+  });
+  new ResizeObserver(() => { try{ fit.fit(); }catch(e){} }).observe($("#term"));
+}
+
+function attach(name){
+  detach(true);
+  current = name;
+  $("#placeholder").style.display = "none";
+  $("#term").style.display = "block";
+  $("#keys").style.display = "flex";
+  ensureTerm();
+  term.reset();
+  connect();
+  refresh();
+  setTimeout(()=>{ try{fit.fit();}catch(e){} term.focus(); }, 30);
+}
+
+function connect(){
+  if(!current) return;
+  const proto = location.protocol==="https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(current)}`);
+  ws.binaryType = "arraybuffer";
+  setConn("connecting…","");
+  ws.onopen = () => {
+    setConn(current+" · live","live");
+    try{ fit.fit(); }catch(e){}
+    ws.send(JSON.stringify({type:"resize",cols:term.cols,rows:term.rows}));
+  };
+  ws.onmessage = ev => term.write(new Uint8Array(ev.data));
+  ws.onclose = () => {
+    if(current){ setConn(current+" · reconnecting…","dead");
+      reconnectTimer = setTimeout(connect, 1500); }
+  };
+  ws.onerror = () => { try{ws.close();}catch(e){} };
+}
+
+function detach(silent){
+  clearTimeout(reconnectTimer); reconnectTimer=null;
+  if(ws){ const w=ws; ws=null; try{w.onclose=null;w.close();}catch(e){} }
+  current = null;
+  if(!silent){
+    $("#term").style.display="none"; $("#keys").style.display="none";
+    $("#placeholder").style.display="flex";
+    setConn("no session","");
+    refresh();
+  }
+}
+
+/* ---------------- quick keys ---------------- */
+for(const b of document.querySelectorAll("#keys button[data-k]")){
+  b.addEventListener("click", ev => {
+    ev.preventDefault();
+    if(ws && ws.readyState===1) ws.send(JSON.stringify({type:"input",data:b.dataset.k}));
+    term && term.focus();
+  });
+}
+$("#pastebtn").onclick = async () => {
+  try{
+    const t = await navigator.clipboard.readText();
+    if(t && ws && ws.readyState===1) ws.send(JSON.stringify({type:"input",data:t}));
+  }catch(e){ alert("clipboard unavailable — long-press the terminal instead"); }
+  term && term.focus();
+};
+
+/* ---------------- mobile sidebar ---------------- */
+function closeSide(){ $("#side").classList.remove("open"); }
+$("#burger").onclick = () => $("#side").classList.toggle("open");
+
+refresh();
+setInterval(refresh, 5000);
+window.addEventListener("beforeunload", () => { if(ws) ws.close(); });
+</script>
+</body>
+</html>
