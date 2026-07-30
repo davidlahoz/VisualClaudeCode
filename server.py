@@ -13,6 +13,7 @@ import os
 import hashlib
 import secrets
 import shlex
+import shutil
 import signal
 import ssl
 import struct
@@ -162,6 +163,52 @@ def request_user(request: web.Request):
 
 def user_target(user: str, name: str) -> str:
     return f"{PREFIX}{user}--{name}"
+
+
+# ------------------------------------------------------------- session metadata
+SESSIONS_META = BASE / "sessions.json"
+
+
+def load_meta() -> dict:
+    if SESSIONS_META.exists():
+        return json.loads(SESSIONS_META.read_text())
+    return {}
+
+
+def save_meta(meta: dict):
+    SESSIONS_META.write_text(json.dumps(meta, indent=2))
+
+
+def claude_history_dir(info: dict) -> Path:
+    """Claude Code stores transcripts under <config>/projects/<munged cwd>."""
+    if info.get("sandbox"):
+        user = info.get("user", "")
+        munged = info.get("container_cwd", "/work").replace("/", "-")
+        return SANDBOX_ROOT / user / "claude-config" / "projects" / munged
+    munged = info.get("cwd", "").replace("/", "-").replace(".", "-")
+    return Path.home() / ".claude" / "projects" / munged
+
+
+def cleanup_session(target: str) -> bool:
+    """Reap container, and for dirs we created: delete files + claude history.
+
+    Returns True if the working directory was deleted. Directories that
+    existed before the session are never touched.
+    """
+    subprocess.run(["docker", "rm", "-f", target], capture_output=True)
+    meta = load_meta()
+    info = meta.pop(target, None)
+    save_meta(meta)
+    if not info or not info.get("delete_dir"):
+        return False
+    path = Path(info.get("cwd", ""))
+    # paranoia: only delete deep, existing paths no other session still uses
+    if (len(path.parts) < 3 or not path.is_dir()
+            or any(m.get("cwd") == info["cwd"] for m in meta.values())):
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    shutil.rmtree(claude_history_dir(info), ignore_errors=True)
+    return True
 
 
 # ------------------------------------------------------------------ 2FA: TOTP
@@ -668,7 +715,7 @@ async def admin_delete_user(request):
     for sess in out.stdout.splitlines():
         if sess.startswith(f"{PREFIX}{name}--"):
             tmux("kill-session", "-t", "=" + sess)
-            subprocess.run(["docker", "rm", "-f", sess], capture_output=True)
+            cleanup_session(sess)
     return web.json_response({"ok": True})
 
 
@@ -703,6 +750,7 @@ async def admin_delete_invite(request):
 
 async def list_sessions(request):
     mine = request["user"] + "--"
+    meta = load_meta()
     out = tmux(
         "list-sessions", "-F",
         "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_path}",
@@ -720,6 +768,7 @@ async def list_sessions(request):
             "created": int(parts[1] or 0),
             "attached": parts[2] not in ("0", ""),
             "path": parts[3],
+            "ephemeral": bool(meta.get(parts[0], {}).get("delete_dir")),
         })
     sessions.sort(key=lambda s: -s["created"])
     return web.json_response(sessions)
@@ -758,7 +807,11 @@ async def create_session(request):
         host_dir = root / "work" / str(sub)[len("/work"):].lstrip("/")
         if host_dir.exists() and not host_dir.is_dir():
             raise web.HTTPBadRequest(text=f"not a directory: {sub}")
+        dir_existed = host_dir.exists()
         host_dir.mkdir(parents=True, exist_ok=True)
+        session_info = {"user": user, "cwd": str(host_dir),
+                        "container_cwd": str(sub), "sandbox": True,
+                        "delete_dir": not dir_existed}
         # reap a stale container left over from a killed tmux session
         subprocess.run(["docker", "rm", "-f", target], capture_output=True)
         docker = [
@@ -783,15 +836,21 @@ async def create_session(request):
             path = Path.home() / path
         if path.exists() and not path.is_dir():
             raise web.HTTPBadRequest(text=f"not a directory: {path}")
+        dir_existed = path.exists()
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise web.HTTPBadRequest(text=f"cannot create directory: {e}")
         cwd = str(path)
+        session_info = {"user": user, "cwd": cwd, "sandbox": False,
+                        "delete_dir": not dir_existed}
         r = tmux("new-session", "-d", "-s", target, "-c", cwd,
                  "-x", "200", "-y", "50", claude_cmd)
     if r.returncode != 0:
         raise web.HTTPInternalServerError(text=r.stderr.strip() or "tmux failed")
+    meta = load_meta()
+    meta[target] = session_info
+    save_meta(meta)
     tmux("set-option", "-t", target, "status", "off")
     tmux("set-option", "-t", target, "window-size", "latest")
     tmux("set-option", "-t", target, "history-limit", "10000")
@@ -806,9 +865,8 @@ async def kill_session(request):
     r = tmux("kill-session", "-t", "=" + target)
     if r.returncode != 0:
         raise web.HTTPNotFound(text=r.stderr.strip() or "no such session")
-    # tmux does not signal-proxy into docker with a tty; reap the container
-    subprocess.run(["docker", "rm", "-f", target], capture_output=True)
-    return web.json_response({"ok": True})
+    files_deleted = cleanup_session(target)
+    return web.json_response({"ok": True, "files_deleted": files_deleted})
 
 
 # ---------------------------------------------------------------- ws bridge
