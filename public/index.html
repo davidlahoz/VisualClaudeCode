@@ -246,7 +246,10 @@ async function refresh(){
       div.onclick = () => { attach(s.name); closeSide(); };
       div.querySelector(".x").onclick = async ev => {
         ev.stopPropagation();
-        if(!confirm(`Kill session "${s.name}"? The Claude conversation stays resumable via --continue in that directory.`)) return;
+        const msg = s.ephemeral
+          ? `Delete session "${s.name}"?\n\nThis PERMANENTLY deletes its working folder and everything in it:\n${s.path}\n\nThe conversation history is deleted too.`
+          : `Delete session "${s.name}"?\n\nThe folder ${s.path} existed before this session, so its files are kept.`;
+        if(!confirm(msg)) return;
         await fetch("/api/sessions/"+encodeURIComponent(s.name), {method:"DELETE"});
         if(current===s.name) detach();
         refresh();
