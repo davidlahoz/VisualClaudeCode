@@ -133,11 +133,28 @@ def sandbox_setup(user: str, model) -> Path:
     cfg = root / "claude-config"
     cfg.mkdir(exist_ok=True)
     root.chmod(0o700)
-    # refresh OAuth credentials from the host account on every session start
+    # refresh OAuth credentials from the host account on every session start.
+    # cfg is bind-mounted into the (root) container and writable by the user,
+    # so a plain write would follow a symlink they planted at dst and let them
+    # overwrite an arbitrary host file. Unlink first, then create with
+    # O_NOFOLLOW|O_EXCL so we never write through a symlink.
     if HOST_CREDS.exists():
         dst = cfg / ".credentials.json"
-        dst.write_bytes(HOST_CREDS.read_bytes())
-        dst.chmod(0o600)
+        data = HOST_CREDS.read_bytes()
+        try:
+            os.remove(dst)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        try:
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            pass  # attacker raced us; skip rather than follow anything
+        else:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
     # ~/.claude.json holds onboarding state; persist it across --rm containers
     cj = root / "claude.json"
     if not cj.exists():
@@ -197,10 +214,15 @@ _jwk_client = None
 
 
 def email_slug(email: str) -> str:
-    s = "".join(c if c.isalnum() else "-" for c in email.lower())
-    while "--" in s:
-        s = s.replace("--", "-")
-    return s[:40].strip("-")
+    # Injective: the readable prefix is collision-prone (case, punctuation,
+    # truncation all fold distinct emails together), so bind it to a hash of
+    # the exact lowercased email. Different emails => different slug, always.
+    email = email.lower()
+    pretty = "".join(c if c.isalnum() else "-" for c in email)
+    while "--" in pretty:
+        pretty = pretty.replace("--", "-")
+    digest = hashlib.sha256(email.encode()).hexdigest()[:10]
+    return (pretty[:29].strip("-") + "-" + digest)
 
 
 def ensure_cf_user(email: str, sub: str) -> str:
@@ -216,8 +238,12 @@ def ensure_cf_user(email: str, sub: str) -> str:
         users[slug] = {"email": email, "cf_sub": sub,
                        "created": int(time.time()), "admin": admin}
         save_users(users)
-    elif rec.get("admin", False) != admin or rec.get("email") != email:
-        rec.update(admin=admin, email=email, cf_sub=sub)
+    elif rec.get("email") != email:
+        # slug is a hash of the email; a mismatch means a hash collision or a
+        # tampered store — refuse rather than hand over another user's account.
+        raise web.HTTPForbidden(text="identity mismatch")
+    elif rec.get("admin", False) != admin:
+        rec.update(admin=admin, cf_sub=sub)
         save_users(users)
     return slug
 
@@ -276,6 +302,40 @@ def claude_history_dir(info: dict) -> Path:
     return Path.home() / ".claude" / "projects" / munged
 
 
+def safe_join(base: Path, rel: str):
+    """Join rel under base and return the real path only if it stays inside
+    base with no symlink escape via any existing component. Else None."""
+    base = base.resolve()
+    target = (base / rel.lstrip("/")).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return None
+    # walk existing prefix: no component may be a symlink
+    cur = base
+    for part in target.relative_to(base).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return None
+        if not cur.exists():
+            break
+    return target
+
+
+def rmtree_confined(path: Path, base: Path):
+    """rmtree(path) only if its real path is strictly inside base and not a
+    symlink itself — prevents deleting host files via a planted symlink."""
+    try:
+        rp = path.resolve()
+        base = base.resolve()
+        rp.relative_to(base)
+        if rp == base or path.is_symlink() or not rp.is_dir():
+            return
+    except (ValueError, OSError):
+        return
+    shutil.rmtree(rp, ignore_errors=True)
+
+
 def cleanup_session(target: str) -> bool:
     """Reap container, and for dirs we created: delete files + claude history.
 
@@ -289,12 +349,23 @@ def cleanup_session(target: str) -> bool:
     if not info or not info.get("delete_dir"):
         return False
     path = Path(info.get("cwd", ""))
-    # paranoia: only delete deep, existing paths no other session still uses
-    if (len(path.parts) < 3 or not path.is_dir()
-            or any(m.get("cwd") == info["cwd"] for m in meta.values())):
+    if any(m.get("cwd") == info["cwd"] for m in meta.values()):
+        return False  # another session still uses this dir
+    # confine deletion to the area we own: the user's sandbox work tree, or
+    # (non-sandbox) somewhere under the host home. Re-resolve to defeat any
+    # symlink planted after creation.
+    if info.get("sandbox") and info.get("user"):
+        base = (SANDBOX_ROOT / info["user"] / "work")
+    else:
+        base = Path.home()
+    if len(path.parts) < 3:
         return False
-    shutil.rmtree(path, ignore_errors=True)
-    shutil.rmtree(claude_history_dir(info), ignore_errors=True)
+    rmtree_confined(path, base)
+    hist = claude_history_dir(info)
+    hist_base = (SANDBOX_ROOT / info["user"] / "claude-config" / "projects"
+                 if info.get("sandbox") and info.get("user")
+                 else Path.home() / ".claude" / "projects")
+    rmtree_confined(hist, hist_base)
     return True
 
 
@@ -351,7 +422,10 @@ def tmux(*args: str) -> subprocess.CompletedProcess:
 
 
 def valid_name(name: str) -> bool:
-    return bool(name) and len(name) <= 40 and all(
+    # No "--": it is the separator in the tmux session name vc-<user>--<name>,
+    # so allowing it in either part would make ownership parsing ambiguous and
+    # let one user address another user's sessions.
+    return bool(name) and len(name) <= 40 and "--" not in name and all(
         c.isalnum() or c in "-_" for c in name
     )
 
@@ -364,9 +438,11 @@ async def auth_middleware(request, handler):
             or path.startswith("/login/") or path.startswith("/vendor/"):
         return await handler(request)
     if AUTH_MODE == "cloudflare":
-        # Access JWT is the identity; signed cookie kept as a
-        # localhost-only fallback for scripts and health checks.
-        user = access_jwt_user(request) or request_user(request)
+        # Access JWT is the sole identity. No cookie fallback: cloudflared
+        # makes every request look local, and stale local-mode cookies remain
+        # signed by the same .secret, so a fallback would be an unauthenticated
+        # bypass of Access.
+        user = access_jwt_user(request)
     else:
         user = request_user(request)
     if user is None:
@@ -962,7 +1038,15 @@ async def create_session(request):
         sub = Path("/work").joinpath(cwd.lstrip("/")).resolve()
         if not str(sub).startswith("/work"):
             raise web.HTTPBadRequest(text="directory must be inside /work")
-        host_dir = root / "work" / str(sub)[len("/work"):].lstrip("/")
+        # The host side of the bind mount is user-writable from inside the
+        # container, so they can plant symlinks in it. mkdir(parents)/rmtree
+        # follow intermediate symlinks — resolve the real host path and
+        # require it (and every existing component) to stay inside work_root,
+        # else a symlink lets them create/delete files anywhere as root.
+        work_root = (root / "work").resolve()
+        host_dir = safe_join(work_root, str(sub)[len("/work"):])
+        if host_dir is None:
+            raise web.HTTPBadRequest(text="directory escapes the sandbox")
         if host_dir.exists() and not host_dir.is_dir():
             raise web.HTTPBadRequest(text=f"not a directory: {sub}")
         dir_existed = host_dir.exists()
