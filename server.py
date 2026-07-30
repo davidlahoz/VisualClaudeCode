@@ -43,6 +43,35 @@ def authed(request: web.Request) -> bool:
     return hmac.compare_digest(tok, TOKEN)
 
 
+def slug(login: str) -> str:
+    """admin@example.com -> admin"""
+    s = login.split("@")[0].lower()
+    s = "".join(c for c in s if c.isalnum() or c in "-_")
+    return s[:24] or "user"
+
+
+DEFAULT_USER = slug(os.environ.get("VC_DEFAULT_USER", "main"))
+
+
+def request_user(request: web.Request):
+    """Identity of the caller, or None if unauthenticated.
+
+    tailscale serve injects Tailscale-User-Login for tailnet traffic and
+    strips any client-supplied copy, so the header is trustworthy. Requests
+    not via serve (local curl) fall back to token auth as DEFAULT_USER.
+    """
+    login = request.headers.get("Tailscale-User-Login", "").strip()
+    if login:
+        return slug(login)
+    if authed(request):
+        return DEFAULT_USER
+    return None
+
+
+def user_target(user: str, name: str) -> str:
+    return f"{PREFIX}{user}--{name}"
+
+
 def tmux(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["tmux", *args], capture_output=True, text=True)
 
@@ -59,10 +88,12 @@ async def auth_middleware(request, handler):
     path = request.path
     if path == "/login" or path.startswith("/vendor/") or path == "/favicon.ico":
         return await handler(request)
-    if not authed(request):
+    user = request_user(request)
+    if user is None:
         if path.startswith("/api/") or path.startswith("/ws/"):
             raise web.HTTPUnauthorized(text="unauthorized")
         raise web.HTTPFound("/login")
+    request["user"] = user
     return await handler(request)
 
 
@@ -108,7 +139,12 @@ async def login_post(request):
 
 
 # ---------------------------------------------------------------- session api
+async def me(request):
+    return web.json_response({"user": request["user"]})
+
+
 async def list_sessions(request):
+    mine = request["user"] + "--"
     out = tmux(
         "list-sessions", "-F",
         "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_path}",
@@ -116,13 +152,17 @@ async def list_sessions(request):
     sessions = []
     for line in out.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) >= 4 and parts[0].startswith(PREFIX):
-            sessions.append({
-                "name": parts[0][len(PREFIX):],
-                "created": int(parts[1] or 0),
-                "attached": parts[2] not in ("0", ""),
-                "path": parts[3],
-            })
+        if len(parts) < 4 or not parts[0].startswith(PREFIX):
+            continue
+        rest = parts[0][len(PREFIX):]
+        if not rest.startswith(mine):
+            continue
+        sessions.append({
+            "name": rest[len(mine):],
+            "created": int(parts[1] or 0),
+            "attached": parts[2] not in ("0", ""),
+            "path": parts[3],
+        })
     sessions.sort(key=lambda s: -s["created"])
     return web.json_response(sessions)
 
@@ -144,7 +184,7 @@ async def create_session(request):
     except OSError as e:
         raise web.HTTPBadRequest(text=f"cannot create directory: {e}")
     cwd = str(path)
-    target = PREFIX + name
+    target = user_target(request["user"], name)
     if tmux("has-session", "-t", "=" + target).returncode == 0:
         raise web.HTTPConflict(text="session already exists")
     # If claude exits, drop to a shell instead of killing the session.
@@ -166,7 +206,7 @@ async def kill_session(request):
     name = request.match_info["name"]
     if not valid_name(name):
         raise web.HTTPBadRequest(text="bad name")
-    r = tmux("kill-session", "-t", "=" + PREFIX + name)
+    r = tmux("kill-session", "-t", "=" + user_target(request["user"], name))
     if r.returncode != 0:
         raise web.HTTPNotFound(text=r.stderr.strip() or "no such session")
     return web.json_response({"ok": True})
@@ -177,7 +217,7 @@ async def ws_terminal(request):
     name = request.match_info["name"]
     if not valid_name(name):
         raise web.HTTPBadRequest(text="bad name")
-    target = PREFIX + name
+    target = user_target(request["user"], name)
     if tmux("has-session", "-t", "=" + target).returncode != 0:
         raise web.HTTPNotFound(text="no such session")
 
@@ -285,11 +325,22 @@ async def index(request):
     return web.FileResponse(BASE / "public" / "index.html")
 
 
+def migrate_legacy_sessions():
+    """Rename pre-multiuser sessions vc-<name> to vc-<DEFAULT_USER>--<name>."""
+    out = tmux("list-sessions", "-F", "#{session_name}")
+    for sess in out.stdout.splitlines():
+        if sess.startswith(PREFIX) and "--" not in sess[len(PREFIX):]:
+            tmux("rename-session", "-t", "=" + sess,
+                 user_target(DEFAULT_USER, sess[len(PREFIX):]))
+
+
 def main():
+    migrate_legacy_sessions()
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", index)
     app.router.add_get("/login", login_get)
     app.router.add_post("/login", login_post)
+    app.router.add_get("/api/me", me)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_delete("/api/sessions/{name}", kill_session)

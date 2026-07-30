@@ -8,7 +8,14 @@ xterm.js) that attaches/detaches.
 ## Access
 
 - URL: **https://host.example.ts.net** (tailnet only)
-- Token: in `/root/VisualClaude/.secret` (paste into the login page; cookie lasts 90 days)
+- **No login needed from the tailnet**: `tailscale serve` injects the verified
+  `Tailscale-User-Login` identity header (and strips spoofed ones), so you land
+  straight in the app, identified by your tailnet account. Each user gets their
+  own session list — tmux sessions are namespaced `vc-<user>--<name>` and one
+  user cannot see or touch another's.
+- Token fallback: `/root/VisualClaude/.secret` still works via the login page
+  or a `vc_token` cookie (used for scripts / direct localhost access); it maps
+  to the user in `VC_DEFAULT_USER` (systemd unit).
 - TLS is terminated by `tailscale serve` with a real Let's Encrypt certificate
   for the tailnet name — browsers show it as fully secure, and Tailscale
   auto-renews it. The app itself listens on 127.0.0.1:7788 plain HTTP only.

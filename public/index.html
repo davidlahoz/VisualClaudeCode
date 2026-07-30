@@ -77,6 +77,7 @@ main{flex:1;display:flex;min-height:0}
   <button id="burger">☰</button>
   <div class="logo"><span>*</span> VisualClaude</div>
   <div id="conn">no session</div>
+  <div id="who" style="margin-left:auto;color:var(--dim);font-size:12px"></div>
 </header>
 <main>
   <nav id="side">
@@ -248,6 +249,9 @@ $("#pastebtn").onclick = async () => {
 function closeSide(){ $("#side").classList.remove("open"); }
 $("#burger").onclick = () => $("#side").classList.toggle("open");
 
+fetch("/api/me").then(r => r.ok ? r.json() : null)
+  .then(m => { if(m) $("#who").textContent = m.user; })
+  .catch(()=>{});
 refresh();
 setInterval(refresh, 5000);
 window.addEventListener("beforeunload", () => { if(ws) ws.close(); });
