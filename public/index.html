@@ -62,6 +62,16 @@ main{flex:1;display:flex;min-height:0}
 #term .xterm{height:100%}
 #placeholder{flex:1;display:flex;align-items:center;justify-content:center;
   color:var(--dim);text-align:center;padding:20px;line-height:1.7}
+/* mobile composer — xterm's hidden-textarea input is unreliable with soft
+   keyboards, so touch devices get a real input that sends text + Enter */
+#composer{flex:none;display:flex;gap:6px;padding:6px 8px;background:var(--bg2);
+  border-top:1px solid var(--border)}
+#composer input{flex:1;background:var(--panel);border:1px solid var(--border);
+  border-radius:6px;padding:8px 10px;color:var(--fg);font:inherit;
+  font-size:16px;min-width:0}  /* 16px stops iOS from zooming on focus */
+#composer input:focus{outline:none;border-color:var(--accent)}
+#composer button{flex:none;background:var(--accent);color:#1a1915;border:none;
+  border-radius:6px;padding:8px 14px;font:inherit;font-weight:600;cursor:pointer}
 /* quick keys */
 #keys{flex:none;display:flex;gap:6px;padding:6px 8px;overflow-x:auto;
   background:var(--bg2);border-top:1px solid var(--border);
@@ -119,6 +129,12 @@ main{flex:1;display:flex;min-height:0}
   header{padding:6px 10px;gap:8px}
   #term{padding-left:4px}
 }
+/* iOS pans the page to reveal a focused input instead of resizing it; with
+   the layout pinned and sized to the visual viewport there is nothing to
+   reveal, so pin it (the JS scroll-reset handles the pan iOS does anyway) */
+@media(pointer:coarse){
+  body{position:fixed;top:0;left:0;right:0}
+}
 @media(max-width:480px){
   #who{display:none}
   header .logo{font-size:13px}
@@ -158,6 +174,12 @@ main{flex:1;display:flex;min-height:0}
       <small>create one on the left — it runs <b>claude</b> inside tmux<br>
       and survives closing this page</small></div>
     <div id="term" style="display:none"></div>
+    <form id="composer" style="display:none">
+      <input id="cin" placeholder="type here, send = Enter" autocomplete="off"
+        autocapitalize="none" autocorrect="off" spellcheck="false"
+        enterkeyhint="send">
+      <button>send</button>
+    </form>
     <div id="keys" style="display:none">
       <button data-k="&#27;">Esc</button>
       <button data-k="&#9;">Tab</button>
@@ -268,6 +290,10 @@ let term = null, fit = null, ws = null, current = null, reconnectTimer = null;
 
 function setConn(txt, cls){ const c=$("#conn"); c.textContent=txt; c.className=cls||""; }
 
+/* surface script errors on screen — phones have no dev console */
+window.addEventListener("error", e =>
+  setConn("js error: " + (e.message || "unknown"), "dead"));
+
 /* ---------------- persistence indicator ---------------- */
 let lastSave = null, savedTimer = null;
 async function pollSaved(){
@@ -352,17 +378,26 @@ function ensureTerm(){
   new ResizeObserver(() => { try{ fit.fit(); }catch(e){} }).observe($("#term"));
 }
 
+/* soft-keyboard typing into xterm is flaky on phones; touch devices get a
+   native input bar instead (toggle with the ⌨ quick key) */
+let composerOn = matchMedia("(pointer: coarse)").matches;
+function showComposer(){
+  $("#composer").style.display = (composerOn && current) ? "flex" : "none";
+}
+
 function attach(name){
   detach(true);
   current = name;
   $("#placeholder").style.display = "none";
   $("#term").style.display = "block";
   $("#keys").style.display = "flex";
+  showComposer();
   ensureTerm();
   term.reset();
   connect();
   refresh();
-  setTimeout(()=>{ try{fit.fit();}catch(e){} term.focus(); }, 30);
+  setTimeout(()=>{ try{fit.fit();}catch(e){}
+    if(composerOn) $("#cin").focus(); else term.focus(); }, 30);
 }
 
 function connect(){
@@ -377,8 +412,9 @@ function connect(){
     ws.send(JSON.stringify({type:"resize",cols:term.cols,rows:term.rows}));
   };
   ws.onmessage = ev => term.write(new Uint8Array(ev.data));
-  ws.onclose = () => {
-    if(current){ setConn(current+" · reconnecting…","dead");
+  ws.onclose = ev => {
+    if(current){
+      setConn(current+" · reconnecting… ("+(ev.code||"?")+")","dead");
       reconnectTimer = setTimeout(connect, 1500); }
   };
   ws.onerror = () => { try{ws.close();}catch(e){} };
@@ -390,6 +426,7 @@ function detach(silent){
   current = null;
   if(!silent){
     $("#term").style.display="none"; $("#keys").style.display="none";
+    $("#composer").style.display="none";
     $("#placeholder").style.display="flex";
     setConn("no session","");
     refresh();
@@ -623,11 +660,23 @@ $("#key-add").onclick = async () => {
     if(!enrolledNow()) secRefresh();
   }catch(e){ if(e) $("#secerr").textContent = e.message || "key registration failed"; }
 };
-/* keep layout matched to the visible viewport (soft keyboard, URL bar) */
-function syncViewport(){
+/* keep layout matched to the visible viewport (soft keyboard, URL bar).
+   iOS pans the page when the keyboard opens instead of resizing it: undo the
+   pan immediately on every viewport event, but debounce the layout/terminal
+   refit so the keyboard animation doesn't thrash tmux with resizes. */
+let vpTimer = null;
+function applyViewport(){
   const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
   document.documentElement.style.setProperty("--vh", h + "px");
   if(fit){ try{ fit.fit(); }catch(e){} }
+  if(term) term.scrollToBottom();
+}
+function syncViewport(){
+  if(window.scrollY ||
+     (window.visualViewport && window.visualViewport.offsetTop > 0))
+    window.scrollTo(0, 0);
+  clearTimeout(vpTimer);
+  vpTimer = setTimeout(applyViewport, 100);
 }
 if(window.visualViewport){
   window.visualViewport.addEventListener("resize", syncViewport);
@@ -635,11 +684,32 @@ if(window.visualViewport){
 }
 window.addEventListener("orientationchange", () => setTimeout(syncViewport, 300));
 window.addEventListener("resize", syncViewport);
-syncViewport();
+/* extra insurance: kill the focus-scroll iOS does before any resize event */
+$("#cin").addEventListener("focus", () => setTimeout(() => window.scrollTo(0, 0), 60));
+applyViewport();
 
-/* summon the on-screen keyboard on touch devices */
-$("#kbdbtn").onclick = ev => { ev.preventDefault(); term && term.focus(); };
-$("#term").addEventListener("touchend", () => term && term.focus());
+/* composer: native input for phones — sends the line + Enter to the session */
+$("#composer button").addEventListener("mousedown", ev => ev.preventDefault());
+$("#composer").onsubmit = ev => {
+  ev.preventDefault();
+  if(ws && ws.readyState===1){
+    ws.send(JSON.stringify({type:"input", data: $("#cin").value + "\r"}));
+    $("#cin").value = "";
+  }else{
+    setConn((current||"?")+" · NOT connected — retrying","dead");
+    if(current && (!ws || ws.readyState===3)) connect();
+  }
+  $("#cin").focus();  // keep the keyboard open
+};
+
+/* ⌨ toggles between the composer bar and typing straight into the terminal */
+$("#kbdbtn").onclick = ev => {
+  ev.preventDefault();
+  composerOn = !composerOn;
+  showComposer();
+  if(composerOn) $("#cin").focus(); else term && term.focus();
+};
+$("#term").addEventListener("touchend", () => { if(!composerOn) term && term.focus(); });
 
 refresh(); pollSaved();
 setInterval(() => { refresh(); pollSaved(); }, 5000);

@@ -7,6 +7,7 @@ talks to this server over HTTP/WebSocket; the server bridges a PTY running
 """
 import asyncio
 import fcntl
+import logging
 import hmac
 import json
 import os
@@ -1366,6 +1367,7 @@ async def persist_cleanup(app):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     app = web.Application(middlewares=[auth_middleware])
     app.on_startup.append(persist_startup)
     app.on_cleanup.append(persist_cleanup)
@@ -1406,7 +1408,8 @@ def main():
         ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)
         scheme = "https"
     print(f"VisualClaudeCode on {scheme}://{HOST}:{PORT}  (token in {SECRET_FILE})")
-    web.run_app(app, host=HOST, port=PORT, ssl_context=ssl_ctx, print=None)
+    web.run_app(app, host=HOST, port=PORT, ssl_context=ssl_ctx, print=None,
+                access_log_format='%a "%r" %s %b "%{User-Agent}i"')
 
 
 if __name__ == "__main__":
