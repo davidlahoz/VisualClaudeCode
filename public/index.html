@@ -64,6 +64,38 @@ main{flex:1;display:flex;min-height:0}
   color:var(--fg);border-radius:6px;padding:6px 11px;font:inherit;font-size:12px;
   cursor:pointer;touch-action:manipulation}
 #keys button:active{background:var(--accent);color:#1a1915}
+.hbtn{background:none;border:1px solid var(--border);color:var(--dim);
+  border-radius:6px;padding:3px 9px;font:inherit;font-size:12px;cursor:pointer}
+.hbtn:hover{color:var(--fg)}
+/* admin panel */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;
+  display:none;align-items:flex-start;justify-content:center;padding:40px 12px;
+  overflow-y:auto}
+#overlay.open{display:flex}
+#admin{background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+  width:min(560px,100%);padding:18px 20px;display:flex;flex-direction:column;gap:16px}
+#admin h3{margin:0;font-size:15px}
+#admin h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;
+  letter-spacing:.12em;color:var(--dim)}
+#admin table{width:100%;border-collapse:collapse;font-size:13px}
+#admin td{padding:5px 6px;border-top:1px solid var(--border)}
+#admin td.r{text-align:right}
+.badge{font-size:10px;color:var(--accent);border:1px solid var(--accent);
+  border-radius:4px;padding:1px 5px;margin-left:6px}
+#admin .row{display:flex;gap:6px}
+#admin input{flex:1;background:var(--panel);border:1px solid var(--border);
+  border-radius:6px;padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;min-width:0}
+#admin input:focus{outline:none;border-color:var(--accent)}
+#admin .act{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
+  padding:7px 12px;font:inherit;font-weight:600;cursor:pointer;flex:none}
+#admin .lnk{background:none;border:none;color:var(--dim);cursor:pointer;
+  font:inherit;font-size:12px;padding:2px 4px}
+#admin .lnk:hover{color:var(--red)}
+#admin .lnk.copy:hover{color:var(--green)}
+#admin code{background:var(--panel);padding:2px 6px;border-radius:4px;
+  user-select:all;word-break:break-all}
+#adminerr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
+#admin .close{align-self:flex-end;margin-top:-6px}
 @media(max-width:760px){
   #burger{display:block}
   #side{position:fixed;z-index:20;top:41px;bottom:0;left:0;transform:translateX(-100%);
@@ -77,10 +109,13 @@ main{flex:1;display:flex;min-height:0}
   <button id="burger">☰</button>
   <div class="logo"><span>*</span> VisualClaude</div>
   <div id="conn">no session</div>
-  <form method="post" action="/logout" style="margin-left:auto;display:flex;align-items:center;gap:8px">
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
     <span id="who" style="color:var(--dim);font-size:12px"></span>
-    <button style="background:none;border:1px solid var(--border);color:var(--dim);border-radius:6px;padding:3px 9px;font:inherit;font-size:12px;cursor:pointer">logout</button>
-  </form>
+    <button id="adminbtn" class="hbtn" style="display:none">admin</button>
+    <form method="post" action="/logout" style="display:contents">
+      <button class="hbtn">logout</button>
+    </form>
+  </div>
 </header>
 <main>
   <nav id="side">
@@ -114,6 +149,31 @@ main{flex:1;display:flex;min-height:0}
     </div>
   </section>
 </main>
+<div id="overlay">
+  <div id="admin">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <h3>Admin</h3>
+      <button class="hbtn close" onclick="document.getElementById('overlay').classList.remove('open')">close</button>
+    </div>
+    <div>
+      <h4>Users</h4>
+      <table><tbody id="userrows"></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <input id="nu-name" placeholder="username" autocomplete="off">
+        <input id="nu-pass" placeholder="password" autocomplete="off">
+        <button class="act" id="nu-btn">Create</button>
+      </div>
+    </div>
+    <div>
+      <h4>Invite codes <span style="color:var(--dim);text-transform:none;letter-spacing:0">(one-time, for self-registration)</span></h4>
+      <table><tbody id="invrows"></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <button class="act" id="ni-btn">+ New invite code</button>
+      </div>
+    </div>
+    <div id="adminerr"></div>
+  </div>
+</div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/addon-weblinks.js"></script>
@@ -253,8 +313,68 @@ function closeSide(){ $("#side").classList.remove("open"); }
 $("#burger").onclick = () => $("#side").classList.toggle("open");
 
 fetch("/api/me").then(r => r.ok ? r.json() : null)
-  .then(m => { if(m) $("#who").textContent = m.user; })
-  .catch(()=>{});
+  .then(m => {
+    if(!m) return;
+    $("#who").textContent = m.user;
+    if(m.admin) $("#adminbtn").style.display = "";
+  }).catch(()=>{});
+
+/* ---------------- admin panel ---------------- */
+async function adminApi(method, path, body){
+  const r = await fetch(path, {method,
+    headers: body ? {"content-type":"application/json"} : {},
+    body: body ? JSON.stringify(body) : undefined});
+  if(!r.ok){ $("#adminerr").textContent = await r.text(); throw 0; }
+  $("#adminerr").textContent = "";
+  return r.json();
+}
+async function adminRefresh(){
+  const [users, invites] = await Promise.all([
+    adminApi("GET","/api/users"), adminApi("GET","/api/invites")]);
+  const ur = $("#userrows"); ur.innerHTML = "";
+  for(const u of users){
+    const tr = document.createElement("tr");
+    const d = new Date(u.created*1000).toISOString().slice(0,10);
+    tr.innerHTML = `<td></td><td style="color:var(--dim)">${d}</td>
+      <td class="r"><button class="lnk">delete</button></td>`;
+    tr.children[0].textContent = u.name;
+    if(u.admin) tr.children[0].innerHTML += '<span class="badge">admin</span>';
+    tr.querySelector("button").onclick = async () => {
+      if(!confirm(`Delete user "${u.name}" and kill all their sessions?`)) return;
+      await adminApi("DELETE","/api/users/"+encodeURIComponent(u.name));
+      adminRefresh();
+    };
+    ur.appendChild(tr);
+  }
+  const ir = $("#invrows"); ir.innerHTML = "";
+  for(const i of invites){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><code></code></td>
+      <td class="r"><button class="lnk copy">copy</button>
+      <button class="lnk">revoke</button></td>`;
+    tr.querySelector("code").textContent = i.code;
+    const [cp, rv] = tr.querySelectorAll("button");
+    cp.onclick = () => { navigator.clipboard.writeText(i.code)
+      .then(()=>{ cp.textContent="copied"; setTimeout(()=>cp.textContent="copy",1200); })
+      .catch(()=>{}); };
+    rv.onclick = async () => {
+      await adminApi("DELETE","/api/invites/"+encodeURIComponent(i.code));
+      adminRefresh();
+    };
+    ir.appendChild(tr);
+  }
+  if(!invites.length) ir.innerHTML =
+    '<tr><td style="color:var(--dim)">no outstanding invites</td></tr>';
+}
+$("#adminbtn").onclick = () => { $("#overlay").classList.add("open"); adminRefresh(); };
+$("#overlay").onclick = ev => { if(ev.target.id==="overlay") $("#overlay").classList.remove("open"); };
+$("#nu-btn").onclick = async () => {
+  await adminApi("POST","/api/users",
+    {name: $("#nu-name").value.trim(), password: $("#nu-pass").value});
+  $("#nu-name").value = ""; $("#nu-pass").value = "";
+  adminRefresh();
+};
+$("#ni-btn").onclick = async () => { await adminApi("POST","/api/invites"); adminRefresh(); };
 refresh();
 setInterval(refresh, 5000);
 window.addEventListener("beforeunload", () => { if(ws) ws.close(); });

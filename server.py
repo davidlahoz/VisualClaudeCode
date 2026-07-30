@@ -56,6 +56,24 @@ def save_users(users: dict):
     USERS_FILE.chmod(0o600)
 
 
+INVITES_FILE = BASE / "invites.json"
+
+
+def load_invites() -> dict:
+    if INVITES_FILE.exists():
+        return json.loads(INVITES_FILE.read_text())
+    return {}
+
+
+def save_invites(invites: dict):
+    INVITES_FILE.write_text(json.dumps(invites, indent=2))
+    INVITES_FILE.chmod(0o600)
+
+
+def is_admin(user: str) -> bool:
+    return bool(load_users().get(user, {}).get("admin"))
+
+
 def hash_pw(password: str, salt: bytes) -> str:
     return hashlib.scrypt(password.encode(), salt=salt,
                           n=16384, r=8, p=1, dklen=32).hex()
@@ -148,7 +166,7 @@ details button{background:#26241e;color:#e8e2d5;border:1px solid #3d3a30}
 <button>Sign in</button><p class=err>__ERR__</p></form>
 <details __OPEN__><summary>Create account</summary>
 <form method=post action=/register>
-<input name=invite type=password placeholder="invite token" autocomplete=off>
+<input name=invite type=password placeholder="invite code" autocomplete=off>
 <input name=user placeholder="username (a-z 0-9 - _)" autocomplete=username>
 <input name=password type=password placeholder="password (min 8 chars)" autocomplete=new-password>
 <button>Register</button><p class=err>__RERR__</p></form></details>
@@ -183,27 +201,46 @@ async def login_post(request):
     return login_page(err="wrong username or password", status=401)
 
 
+def create_user(users: dict, user: str, password: str, admin: bool = False):
+    """Validate and add a user to the dict. Returns an error string or None."""
+    if not valid_name(user):
+        return "username: a-z, 0-9, - and _ only (max 40)"
+    if len(password) < 8:
+        return "password must be at least 8 characters"
+    if user in users:
+        return "username already taken"
+    salt = secrets.token_bytes(16)
+    users[user] = {"salt": salt.hex(), "hash": hash_pw(password, salt),
+                   "created": int(time.time()), "admin": admin}
+    save_users(users)
+    return None
+
+
 async def register_post(request):
     form = await request.post()
     invite = str(form.get("invite", ""))
     user = str(form.get("user", "")).strip().lower()
     password = str(form.get("password", ""))
     await asyncio.sleep(0.4)
-    if not hmac.compare_digest(invite, TOKEN):
-        return login_page(rerr="wrong invite token", status=403)
-    if not valid_name(user):
-        return login_page(rerr="username: a-z, 0-9, - and _ only (max 40)",
-                          status=400)
-    if len(password) < 8:
-        return login_page(rerr="password must be at least 8 characters",
-                          status=400)
     users = load_users()
-    if user in users:
-        return login_page(rerr="username already taken", status=409)
-    salt = secrets.token_bytes(16)
-    users[user] = {"salt": salt.hex(), "hash": hash_pw(password, salt),
-                   "created": int(time.time())}
-    save_users(users)
+    if not users:
+        # bootstrap: the master token creates the first account, as admin
+        if not hmac.compare_digest(invite, TOKEN):
+            return login_page(rerr="wrong invite token", status=403)
+        admin = True
+    else:
+        invites = load_invites()
+        matched = next((c for c in invites
+                        if hmac.compare_digest(invite, c)), None)
+        if matched is None:
+            return login_page(rerr="invalid invite code", status=403)
+        admin = False
+    err = create_user(users, user, password, admin=admin)
+    if err:
+        return login_page(rerr=err, status=400)
+    if users and not admin:
+        del invites[matched]  # consume only after successful registration
+        save_invites(invites)
     return session_response(user)
 
 
@@ -215,7 +252,83 @@ async def logout_post(request):
 
 # ---------------------------------------------------------------- session api
 async def me(request):
-    return web.json_response({"user": request["user"]})
+    return web.json_response({"user": request["user"],
+                              "admin": is_admin(request["user"])})
+
+
+# ---------------------------------------------------------------- admin api
+def require_admin(request):
+    if not is_admin(request["user"]):
+        raise web.HTTPForbidden(text="admin only")
+
+
+async def admin_list_users(request):
+    require_admin(request)
+    users = load_users()
+    return web.json_response([
+        {"name": u, "created": rec.get("created", 0),
+         "admin": bool(rec.get("admin"))}
+        for u, rec in sorted(users.items())
+    ])
+
+
+async def admin_create_user(request):
+    require_admin(request)
+    body = await request.json()
+    users = load_users()
+    err = create_user(users, str(body.get("name", "")).strip().lower(),
+                      str(body.get("password", "")),
+                      admin=bool(body.get("admin")))
+    if err:
+        raise web.HTTPBadRequest(text=err)
+    return web.json_response({"ok": True}, status=201)
+
+
+async def admin_delete_user(request):
+    require_admin(request)
+    name = request.match_info["name"]
+    if name == request["user"]:
+        raise web.HTTPBadRequest(text="cannot delete yourself")
+    users = load_users()
+    if name not in users:
+        raise web.HTTPNotFound(text="no such user")
+    del users[name]
+    save_users(users)
+    # kill their tmux sessions too
+    out = tmux("list-sessions", "-F", "#{session_name}")
+    for sess in out.stdout.splitlines():
+        if sess.startswith(f"{PREFIX}{name}--"):
+            tmux("kill-session", "-t", "=" + sess)
+    return web.json_response({"ok": True})
+
+
+async def admin_list_invites(request):
+    require_admin(request)
+    return web.json_response([
+        {"code": c, "created": rec.get("created", 0)}
+        for c, rec in sorted(load_invites().items(),
+                             key=lambda kv: -kv[1].get("created", 0))
+    ])
+
+
+async def admin_create_invite(request):
+    require_admin(request)
+    invites = load_invites()
+    code = secrets.token_urlsafe(9)
+    invites[code] = {"created": int(time.time()), "by": request["user"]}
+    save_invites(invites)
+    return web.json_response({"code": code}, status=201)
+
+
+async def admin_delete_invite(request):
+    require_admin(request)
+    invites = load_invites()
+    code = request.match_info["code"]
+    if code not in invites:
+        raise web.HTTPNotFound(text="no such invite")
+    del invites[code]
+    save_invites(invites)
+    return web.json_response({"ok": True})
 
 
 async def list_sessions(request):
@@ -408,6 +521,12 @@ def main():
     app.router.add_post("/register", register_post)
     app.router.add_post("/logout", logout_post)
     app.router.add_get("/api/me", me)
+    app.router.add_get("/api/users", admin_list_users)
+    app.router.add_post("/api/users", admin_create_user)
+    app.router.add_delete("/api/users/{name}", admin_delete_user)
+    app.router.add_get("/api/invites", admin_list_invites)
+    app.router.add_post("/api/invites", admin_create_invite)
+    app.router.add_delete("/api/invites/{code}", admin_delete_invite)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_delete("/api/sessions/{name}", kill_session)

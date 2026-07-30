@@ -9,10 +9,15 @@ xterm.js) that attaches/detaches.
 
 - URL: **https://host.example.ts.net** (tailnet only — Tailscale is
   purely the network layer, it knows nothing about app users)
-- **App accounts**: register on the login page with the invite token from
-  `/root/VisualClaude/.secret` plus a username and password (scrypt-hashed in
-  `users.json`). After that, sign in with username + password; the signed
-  session cookie keeps you logged in for 90 days. Logout button in the header.
+- **App accounts**: sign in with username + password (scrypt-hashed in
+  `users.json`); the signed session cookie keeps you logged in for 90 days.
+  The very first account is bootstrapped by registering with the master token
+  from `/root/VisualClaude/.secret` and becomes **admin**; after that the
+  master token no longer registers accounts.
+- **Admin panel** (button in the header for admins): list/create/delete users
+  and mint one-time invite codes that let someone register themselves.
+  Deleting a user also kills all their tmux sessions. Codes are single-use and
+  revocable; consumed only on successful registration.
 - Each user only sees their own sessions — tmux sessions are namespaced
   `vc-<user>--<name>` and one user cannot list, attach, or kill another's.
 - TLS is terminated by `tailscale serve` with a real Let's Encrypt certificate
