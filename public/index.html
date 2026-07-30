@@ -469,12 +469,13 @@ async function adminRefresh(){
   for(const i of invites){
     const tr = document.createElement("tr");
     tr.innerHTML = `<td><code></code></td>
-      <td class="r"><button class="lnk copy">copy</button>
+      <td class="r"><button class="lnk copy">copy link</button>
       <button class="lnk">revoke</button></td>`;
     tr.querySelector("code").textContent = i.code;
     const [cp, rv] = tr.querySelectorAll("button");
-    cp.onclick = () => { navigator.clipboard.writeText(i.code)
-      .then(()=>{ cp.textContent="copied"; setTimeout(()=>cp.textContent="copy",1200); })
+    cp.onclick = () => { navigator.clipboard.writeText(
+        location.origin + "/login?invite=" + encodeURIComponent(i.code))
+      .then(()=>{ cp.textContent="copied"; setTimeout(()=>cp.textContent="copy link",1200); })
       .catch(()=>{}); };
     rv.onclick = async () => {
       await adminApi("DELETE","/api/invites/"+encodeURIComponent(i.code));
