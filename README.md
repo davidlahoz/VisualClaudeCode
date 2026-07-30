@@ -14,7 +14,38 @@ xterm.js) that attaches/detaches.
   [docs/cloudflare.md](docs/cloudflare.md).
 - The app independently validates the Access JWT (signature via team JWKS,
   audience, issuer, expiry) on every request; user records auto-provision
-  keyed to the Access identity. Admins = `VCC_ADMIN_EMAILS` in `.env`.
+  keyed to the Access identity.
+
+### Admin control (SENSITIVE)
+
+Admin is **not** granted to whoever signs in first. In cloudflare mode it is
+determined solely by `VCC_ADMIN_EMAILS` in `.env`, re-evaluated from that list
+on every request. Being *allowed* by the Access policy only lets someone reach
+the app as a normal user; admin is a separate, explicit whitelist.
+
+Treat this list as root-equivalent: an admin can create users, **turn off a
+user's sandbox** (which gives that account a root shell on this host), raise
+session limits, and delete users and their files. Only put fully-trusted
+identities in it. Changes apply on the user's next request after
+`systemctl restart visualclaude`. To add an admin: append the email
+(comma-separated) and restart.
+
+### First-run deployment
+
+Filling `.env` alone does **not** provision Cloudflare. After copying
+`.env.example` to `.env` and filling in the token, zone, hostname and admin
+email, run once:
+
+```
+.venv/bin/python scripts/deploy.py
+```
+
+That creates/updates the tunnel, DNS, Access app + allow policy, and login
+method; writes the discovered `VCC_ACCESS_TEAM_DOMAIN`/`VCC_ACCESS_AUD` back
+into `.env`; installs the `cloudflared` service; and restarts the app. It is
+idempotent — safe to re-run after changing allowed emails or the hostname.
+The app service itself auto-starts on boot; only the one-time Cloudflare
+provisioning needs this script.
 - Legacy standalone mode (`VCC_AUTH=local`): username/password accounts with
   optional TOTP/WebAuthn 2FA, invite codes, and self-served TLS — still in
   the codebase for deployments without Cloudflare.
