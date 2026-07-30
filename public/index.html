@@ -362,6 +362,8 @@ fetch("/api/me").then(r => r.ok ? r.json() : null)
     if(!m) return;
     $("#who").textContent = m.user;
     if(m.admin) $("#adminbtn").style.display = "";
+    if(!m.allow_args) $("#f-args").style.display = "none";
+    if(m.sandbox) $("#f-cwd").placeholder = "folder in your workspace (created if missing)";
   }).catch(()=>{});
 
 /* ---------------- admin panel ---------------- */

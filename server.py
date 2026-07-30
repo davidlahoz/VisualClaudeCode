@@ -487,8 +487,12 @@ async def logout_post(request):
 
 # ---------------------------------------------------------------- session api
 async def me(request):
+    users = load_users()
+    prefs = user_prefs(users, request["user"])
     return web.json_response({"user": request["user"],
-                              "admin": is_admin(request["user"])})
+                              "admin": is_admin(request["user"]),
+                              "allow_args": prefs["allow_args"],
+                              "sandbox": prefs["sandbox"]})
 
 
 # ------------------------------------------------------------- 2fa self-service
