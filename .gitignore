@@ -8,3 +8,4 @@ users.json
 invites.json
 .claude/
 sessions.json
+.env

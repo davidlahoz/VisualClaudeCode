@@ -23,6 +23,7 @@ import termios
 import time
 from pathlib import Path
 
+import jwt as jwt_lib
 from aiohttp import web, WSMsgType
 from webauthn import (
     generate_authentication_options, generate_registration_options,
@@ -33,8 +34,33 @@ from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
 from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 BASE = Path(__file__).resolve().parent
+
+
+def _load_env():
+    """Minimal .env loader; real env vars take precedence."""
+    envf = BASE / ".env"
+    if envf.exists():
+        for line in envf.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"'))
+
+
+_load_env()
+
 HOST = os.environ.get("VC_HOST", "127.0.0.1")
 PORT = int(os.environ.get("VC_PORT", "7788"))
+
+# auth mode: "local" = username/password (+optional 2FA) managed by this app;
+# "cloudflare" = identity comes from a validated Cloudflare Access JWT and
+# all login/2FA/invite machinery in this app is disabled.
+AUTH_MODE = os.environ.get("VCC_AUTH", "local")
+ACCESS_TEAM = os.environ.get("VCC_ACCESS_TEAM_DOMAIN", "")
+ACCESS_AUD = os.environ.get("VCC_ACCESS_AUD", "")
+ADMIN_EMAILS = {e.strip().lower()
+                for e in os.environ.get("VCC_ADMIN_EMAILS", "").split(",")
+                if e.strip()}
 PREFIX = "vc-"
 SECRET_FILE = BASE / ".secret"
 CERT_FILE = BASE / "certs" / "cert.pem"
@@ -96,6 +122,7 @@ def user_prefs(users: dict, user: str) -> dict:
         "model": rec.get("model") or None,          # pin sessions to a model
         "allow_args": bool(rec.get("admin")) or bool(rec.get("allow_args")),
         "sandbox": bool(rec.get("sandbox")),        # run in docker
+        "max_sessions": rec.get("max_sessions") or 0,  # 0 = unlimited
     }
 
 
@@ -163,6 +190,66 @@ def request_user(request: web.Request):
 
 def user_target(user: str, name: str) -> str:
     return f"{PREFIX}{user}--{name}"
+
+
+# ------------------------------------------------- Cloudflare Access identity
+_jwk_client = None
+
+
+def email_slug(email: str) -> str:
+    s = "".join(c if c.isalnum() else "-" for c in email.lower())
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s[:40].strip("-")
+
+
+def ensure_cf_user(email: str, sub: str) -> str:
+    """Map a verified Access identity to an app user, creating on first visit.
+
+    Admin status is derived exclusively from VCC_ADMIN_EMAILS.
+    """
+    slug = email_slug(email)
+    users = load_users()
+    rec = users.get(slug)
+    admin = email in ADMIN_EMAILS
+    if rec is None:
+        users[slug] = {"email": email, "cf_sub": sub,
+                       "created": int(time.time()), "admin": admin}
+        save_users(users)
+    elif rec.get("admin", False) != admin or rec.get("email") != email:
+        rec.update(admin=admin, email=email, cf_sub=sub)
+        save_users(users)
+    return slug
+
+
+def access_jwt_user(request: web.Request):
+    """Validate the Cloudflare Access JWT and return the app username.
+
+    The tunnel only accepts traffic that passed Access, but we still verify
+    the signed JWT (signature, audience, issuer, expiry) so a misconfigured
+    tunnel or a local process cannot impersonate anyone.
+    """
+    global _jwk_client
+    token = (request.headers.get("Cf-Access-Jwt-Assertion")
+             or request.cookies.get("CF_Authorization", ""))
+    if not token or not ACCESS_TEAM or not ACCESS_AUD:
+        return None
+    try:
+        if _jwk_client is None:
+            _jwk_client = jwt_lib.PyJWKClient(
+                f"https://{ACCESS_TEAM}/cdn-cgi/access/certs",
+                cache_keys=True, lifespan=3600)
+        key = _jwk_client.get_signing_key_from_jwt(token)
+        claims = jwt_lib.decode(
+            token, key.key, algorithms=["RS256"], audience=ACCESS_AUD,
+            issuer=f"https://{ACCESS_TEAM}",
+            options={"require": ["exp", "iat", "aud", "iss"]})
+    except Exception:
+        return None
+    email = str(claims.get("email", "")).lower()
+    if not email:
+        return None  # service tokens etc. have no email; not supported here
+    return ensure_cf_user(email, str(claims.get("sub", "")))
 
 
 # ------------------------------------------------------------- session metadata
@@ -276,20 +363,31 @@ async def auth_middleware(request, handler):
     if path in ("/login", "/register", "/logout", "/favicon.ico") \
             or path.startswith("/login/") or path.startswith("/vendor/"):
         return await handler(request)
-    user = request_user(request)
+    if AUTH_MODE == "cloudflare":
+        # Access JWT is the identity; signed cookie kept as a
+        # localhost-only fallback for scripts and health checks.
+        user = access_jwt_user(request) or request_user(request)
+    else:
+        user = request_user(request)
     if user is None:
         if path.startswith("/api/") or path.startswith("/ws/"):
             raise web.HTTPUnauthorized(text="unauthorized")
         raise web.HTTPFound("/login")
     request["user"] = user
-    # admin-mandated 2FA: until enrolled, only the security endpoints work
-    if path.startswith(("/api/", "/ws/")) \
+    # admin-mandated 2FA (local mode only; Cloudflare Access owns MFA)
+    if AUTH_MODE != "cloudflare" and path.startswith(("/api/", "/ws/")) \
             and not path.startswith(("/api/me", "/api/2fa")):
         rec = load_users().get(user) or {}
         if rec.get("require_2fa") and not has_second_factor(rec):
             raise web.HTTPForbidden(
                 text="2FA setup is required for your account")
     return await handler(request)
+
+
+def local_auth_only(request):
+    """Routes that only exist in local-auth mode (login/2FA/invites)."""
+    if AUTH_MODE == "cloudflare":
+        raise web.HTTPNotFound(text="managed by Cloudflare Access")
 
 
 # ---------------------------------------------------------------- auth pages
@@ -342,6 +440,8 @@ def session_response(user: str) -> web.Response:
 
 
 async def login_get(request):
+    if AUTH_MODE == "cloudflare":
+        raise web.HTTPFound("/")
     return login_page(invite=request.query.get("invite", ""))
 
 
@@ -410,6 +510,8 @@ def tfa_page(rec: dict, err: str = "", status: int = 200):
 
 
 async def login_post(request):
+    if AUTH_MODE == "cloudflare":
+        raise web.HTTPFound("/")
     form = await request.post()
     user = str(form.get("user", "")).strip().lower()
     password = str(form.get("password", ""))
@@ -428,6 +530,7 @@ async def login_post(request):
 
 
 async def tfa_post(request):
+    local_auth_only(request)
     user = pre_user(request)
     if user is None:
         raise web.HTTPFound("/login")
@@ -444,6 +547,7 @@ async def tfa_post(request):
 
 
 async def login_webauthn_start(request):
+    local_auth_only(request)
     user = pre_user(request)
     if user is None:
         raise web.HTTPUnauthorized(text="expired, log in again")
@@ -461,6 +565,7 @@ async def login_webauthn_start(request):
 
 
 async def login_webauthn_finish(request):
+    local_auth_only(request)
     user = pre_user(request)
     if user is None:
         raise web.HTTPUnauthorized(text="expired, log in again")
@@ -509,6 +614,7 @@ def create_user(users: dict, user: str, password: str, admin: bool = False):
 
 
 async def register_post(request):
+    local_auth_only(request)
     form = await request.post()
     invite = str(form.get("invite", ""))
     user = str(form.get("user", "")).strip().lower()
@@ -537,7 +643,10 @@ async def register_post(request):
 
 
 async def logout_post(request):
-    resp = web.HTTPFound("/login")
+    if AUTH_MODE == "cloudflare":
+        resp = web.HTTPFound(f"https://{ACCESS_TEAM}/cdn-cgi/access/logout")
+    else:
+        resp = web.HTTPFound("/login")
     resp.del_cookie(COOKIE)
     return resp
 
@@ -552,13 +661,17 @@ async def me(request):
         "admin": is_admin(request["user"]),
         "allow_args": prefs["allow_args"],
         "sandbox": prefs["sandbox"],
-        "must_enroll_2fa": bool(rec.get("require_2fa"))
+        "must_enroll_2fa": AUTH_MODE != "cloudflare"
+                           and bool(rec.get("require_2fa"))
                            and not has_second_factor(rec),
+        "auth": AUTH_MODE,
+        "email": rec.get("email", ""),
     })
 
 
 # ------------------------------------------------------------- 2fa self-service
 async def tfa_status(request):
+    local_auth_only(request)
     rec = load_users().get(request["user"]) or {}
     return web.json_response({
         "totp": bool(rec.get("totp")),
@@ -568,6 +681,7 @@ async def tfa_status(request):
 
 
 async def totp_start(request):
+    local_auth_only(request)
     user = request["user"]
     users = load_users()
     secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
@@ -579,6 +693,7 @@ async def totp_start(request):
 
 
 async def totp_confirm(request):
+    local_auth_only(request)
     user = request["user"]
     body = await request.json()
     users = load_users()
@@ -594,6 +709,7 @@ async def totp_confirm(request):
 
 
 async def totp_disable(request):
+    local_auth_only(request)
     user = request["user"]
     body = await request.json()
     users = load_users()
@@ -608,6 +724,7 @@ async def totp_disable(request):
 
 
 async def webauthn_reg_start(request):
+    local_auth_only(request)
     user = request["user"]
     rec = load_users().get(user) or {}
     opts = generate_registration_options(
@@ -622,6 +739,7 @@ async def webauthn_reg_start(request):
 
 
 async def webauthn_reg_finish(request):
+    local_auth_only(request)
     user = request["user"]
     challenge = pop_challenge("reg", user)
     if challenge is None:
@@ -648,6 +766,7 @@ async def webauthn_reg_finish(request):
 
 
 async def webauthn_delete(request):
+    local_auth_only(request)
     user = request["user"]
     cred_id = request.match_info["id"]
     users = load_users()
@@ -671,12 +790,14 @@ async def admin_list_users(request):
     users = load_users()
     return web.json_response([
         {"name": u, "created": rec.get("created", 0),
+         "email": rec.get("email", ""),
          "admin": bool(rec.get("admin")),
          "model": rec.get("model") or "",
          "allow_args": bool(rec.get("allow_args")),
          "sandbox": bool(rec.get("sandbox")),
          "require_2fa": bool(rec.get("require_2fa")),
-         "has_2fa": has_second_factor(rec)}
+         "has_2fa": has_second_factor(rec),
+         "max_sessions": rec.get("max_sessions") or 0}
         for u, rec in sorted(users.items())
     ])
 
@@ -700,6 +821,12 @@ async def admin_update_user(request):
         users[name]["sandbox"] = bool(body["sandbox"])
     if "require_2fa" in body:
         users[name]["require_2fa"] = bool(body["require_2fa"])
+    if "max_sessions" in body:
+        try:
+            n = max(0, min(100, int(body["max_sessions"] or 0)))
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="max_sessions must be a number")
+        users[name]["max_sessions"] = n
     if body.get("reset_2fa"):  # lockout recovery
         for k in ("totp", "totp_pending", "webauthn"):
             users[name].pop(k, None)
@@ -708,6 +835,7 @@ async def admin_update_user(request):
 
 
 async def admin_create_user(request):
+    local_auth_only(request)
     require_admin(request)
     body = await request.json()
     users = load_users()
@@ -739,6 +867,7 @@ async def admin_delete_user(request):
 
 
 async def admin_list_invites(request):
+    local_auth_only(request)
     require_admin(request)
     return web.json_response([
         {"code": c, "created": rec.get("created", 0)}
@@ -748,6 +877,7 @@ async def admin_list_invites(request):
 
 
 async def admin_create_invite(request):
+    local_auth_only(request)
     require_admin(request)
     invites = load_invites()
     code = secrets.token_urlsafe(9)
@@ -757,6 +887,7 @@ async def admin_create_invite(request):
 
 
 async def admin_delete_invite(request):
+    local_auth_only(request)
     require_admin(request)
     invites = load_invites()
     code = request.match_info["code"]
@@ -804,6 +935,14 @@ async def create_session(request):
     prefs = user_prefs(load_users(), user)
     if extra and not prefs["allow_args"]:
         raise web.HTTPForbidden(text="claude args are not allowed for your account")
+    if prefs["max_sessions"]:
+        mine = f"{PREFIX}{user}--"
+        out = tmux("list-sessions", "-F", "#{session_name}")
+        count = sum(1 for s in out.stdout.splitlines() if s.startswith(mine))
+        if count >= prefs["max_sessions"]:
+            raise web.HTTPForbidden(
+                text=f"session limit reached ({prefs['max_sessions']}) — "
+                     "delete a session first")
 
     claude_cmd = "claude"
     if prefs["model"]:

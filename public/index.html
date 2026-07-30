@@ -223,13 +223,13 @@ main{flex:1;display:flex;min-height:0}
     <div>
       <h4>Users</h4>
       <div id="userrows"></div>
-      <div class="row" style="margin-top:8px">
+      <div class="row localonly" style="margin-top:8px">
         <input id="nu-name" placeholder="username" autocomplete="off">
         <input id="nu-pass" placeholder="password" autocomplete="off">
         <button class="act" id="nu-btn">Create</button>
       </div>
     </div>
-    <div>
+    <div class="localonly">
       <h4>Invite codes <span style="color:var(--dim);text-transform:none;letter-spacing:0">(one-time, for self-registration)</span></h4>
       <table><tbody id="invrows"></tbody></table>
       <div class="row" style="margin-top:8px">
@@ -388,7 +388,9 @@ $("#burger").onclick = () => $("#side").classList.toggle("open");
 fetch("/api/me").then(r => r.ok ? r.json() : null)
   .then(m => {
     if(!m) return;
-    $("#who").textContent = m.user;
+    $("#who").textContent = m.email || m.user;
+    window.CFMODE = m.auth === "cloudflare";
+    if(window.CFMODE) $("#secbtn").style.display = "none";
     if(m.admin) $("#adminbtn").style.display = "";
     if(!m.allow_args) $("#f-args").style.display = "none";
     if(m.sandbox) $("#f-cwd").placeholder = "folder in your workspace (created if missing)";
@@ -411,8 +413,11 @@ async function adminApi(method, path, body){
   return r.json();
 }
 async function adminRefresh(){
-  const [users, invites] = await Promise.all([
-    adminApi("GET","/api/users"), adminApi("GET","/api/invites")]);
+  const users = await adminApi("GET","/api/users");
+  const invites = window.CFMODE ? [] : await adminApi("GET","/api/invites");
+  if(window.CFMODE){
+    document.querySelectorAll(".localonly").forEach(e => e.style.display = "none");
+  }
   const ur = $("#userrows"); ur.innerHTML = "";
   for(const u of users){
     const tr = document.createElement("div");
@@ -430,11 +435,19 @@ async function adminRefresh(){
           <input type="checkbox" class="args"> args</label>
         <label title="run sessions in a docker container, no host access">
           <input type="checkbox" class="sandbox"> sandbox</label>
-        <label title="user must enroll a 2FA factor before using the app">
+        <label class="tfactl" title="user must enroll a 2FA factor before using the app">
           <input type="checkbox" class="req2fa"> require 2FA</label>
+        <label title="max concurrent sessions, 0 or empty = unlimited">max
+          <input type="number" class="maxs" min="0" max="100"
+            style="width:52px;flex:none;padding:3px 6px"></label>
       </div>`;
     const nm = tr.querySelector(".nm");
     nm.textContent = u.name;
+    if(u.email) nm.title = u.email;
+    if(window.CFMODE){
+      tr.querySelector(".tfactl").style.display = "none";
+      tr.querySelector(".r2fa").style.display = "none";
+    }
     if(u.admin) nm.innerHTML += '<span class="badge">admin</span>';
     if(u.has_2fa) nm.innerHTML +=
       '<span class="badge" style="color:var(--green);border-color:var(--green)" title="has 2FA enrolled">2fa</span>';
@@ -454,6 +467,9 @@ async function adminRefresh(){
     const rq = tr.querySelector(".req2fa");
     rq.checked = u.require_2fa;
     rq.onchange = () => patch({require_2fa: rq.checked});
+    const mx = tr.querySelector(".maxs");
+    mx.value = u.max_sessions || "";
+    mx.onchange = () => patch({max_sessions: parseInt(mx.value || "0", 10)});
     tr.querySelector(".r2fa").onclick = async () => {
       if(!confirm(`Remove all 2FA factors from "${u.name}"? They log in with password only until re-enrolling.`)) return;
       patch({reset_2fa: true});
