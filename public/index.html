@@ -86,6 +86,10 @@ main{flex:1;display:flex;min-height:0}
 #admin input{flex:1;background:var(--panel);border:1px solid var(--border);
   border-radius:6px;padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;min-width:0}
 #admin input:focus{outline:none;border-color:var(--accent)}
+#admin select{background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:3px 6px;color:var(--fg);font:inherit;font-size:12px}
+#admin label{font-size:12px;color:var(--dim);white-space:nowrap;cursor:pointer}
+#admin input[type=checkbox]{accent-color:var(--accent)}
 #admin .act{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
   padding:7px 12px;font:inherit;font-weight:600;cursor:pointer;flex:none}
 #admin .lnk{background:none;border:none;color:var(--dim);cursor:pointer;
@@ -334,12 +338,33 @@ async function adminRefresh(){
   const ur = $("#userrows"); ur.innerHTML = "";
   for(const u of users){
     const tr = document.createElement("tr");
-    const d = new Date(u.created*1000).toISOString().slice(0,10);
-    tr.innerHTML = `<td></td><td style="color:var(--dim)">${d}</td>
+    tr.innerHTML = `<td></td>
+      <td><select title="pin model (hard-enforced only in sandbox)">
+        <option value="">any model</option>
+        <option value="sonnet">sonnet</option>
+        <option value="opus">opus</option>
+        <option value="haiku">haiku</option></select></td>
+      <td><label title="allow extra claude CLI args on session create">
+        <input type="checkbox" class="args"> args</label></td>
+      <td><label title="run sessions in a docker container, no host access">
+        <input type="checkbox" class="sandbox"> sandbox</label></td>
       <td class="r"><button class="lnk">delete</button></td>`;
     tr.children[0].textContent = u.name;
     if(u.admin) tr.children[0].innerHTML += '<span class="badge">admin</span>';
-    tr.querySelector("button").onclick = async () => {
+    const patch = body =>
+      adminApi("PATCH","/api/users/"+encodeURIComponent(u.name), body)
+        .then(adminRefresh);
+    const sel = tr.querySelector("select");
+    sel.value = u.model;
+    sel.onchange = () => patch({model: sel.value});
+    const args = tr.querySelector(".args");
+    args.checked = u.allow_args || u.admin;
+    args.disabled = u.admin;  // admins always may pass args
+    args.onchange = () => patch({allow_args: args.checked});
+    const sb = tr.querySelector(".sandbox");
+    sb.checked = u.sandbox;
+    sb.onchange = () => patch({sandbox: sb.checked});
+    tr.querySelector(".lnk").onclick = async () => {
       if(!confirm(`Delete user "${u.name}" and kill all their sessions?`)) return;
       await adminApi("DELETE","/api/users/"+encodeURIComponent(u.name));
       adminRefresh();
