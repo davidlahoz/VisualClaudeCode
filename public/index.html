@@ -102,6 +102,12 @@ main{flex:1;display:flex;min-height:0}
 .panel code{background:var(--panel);padding:2px 6px;border-radius:4px;
   user-select:all;word-break:break-all}
 .perr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
+.ucard{border-top:1px solid var(--border);padding:8px 2px;display:flex;
+  flex-direction:column;gap:7px}
+.ucard .uhead{display:flex;align-items:center;gap:4px;font-size:13px}
+.ucard .uhead .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ucard .uhead .sp{flex:1}
+.ucard .uctl{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
 @media(max-width:760px){
   #burger{display:block}
   #side{position:fixed;z-index:20;top:41px;bottom:0;left:0;transform:translateX(-100%);
@@ -216,7 +222,7 @@ main{flex:1;display:flex;min-height:0}
     </div>
     <div>
       <h4>Users</h4>
-      <table><tbody id="userrows"></tbody></table>
+      <div id="userrows"></div>
       <div class="row" style="margin-top:8px">
         <input id="nu-name" placeholder="username" autocomplete="off">
         <input id="nu-pass" placeholder="password" autocomplete="off">
@@ -409,24 +415,28 @@ async function adminRefresh(){
     adminApi("GET","/api/users"), adminApi("GET","/api/invites")]);
   const ur = $("#userrows"); ur.innerHTML = "";
   for(const u of users){
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td></td>
-      <td><select title="pin model (hard-enforced only in sandbox)">
-        <option value="">any model</option>
-        <option value="sonnet">sonnet</option>
-        <option value="opus">opus</option>
-        <option value="haiku">haiku</option></select></td>
-      <td><label title="allow extra claude CLI args on session create">
-        <input type="checkbox" class="args"> args</label></td>
-      <td><label title="run sessions in a docker container, no host access">
-        <input type="checkbox" class="sandbox"> sandbox</label></td>
-      <td><label title="user must enroll a 2FA factor before using the app">
-        <input type="checkbox" class="req2fa"> 2FA</label></td>
-      <td class="r"><button class="lnk r2fa">reset 2FA</button>
-        <button class="lnk">delete</button></td>`;
-    tr.children[0].textContent = u.name;
-    if(u.admin) tr.children[0].innerHTML += '<span class="badge">admin</span>';
-    if(u.has_2fa) tr.children[0].innerHTML +=
+    const tr = document.createElement("div");
+    tr.className = "ucard";
+    tr.innerHTML = `<div class="uhead"><span class="nm"></span><span class="sp"></span>
+        <button class="lnk r2fa">reset 2FA</button>
+        <button class="lnk">delete</button></div>
+      <div class="uctl">
+        <select title="pin model (hard-enforced only in sandbox)">
+          <option value="">any model</option>
+          <option value="sonnet">sonnet</option>
+          <option value="opus">opus</option>
+          <option value="haiku">haiku</option></select>
+        <label title="allow extra claude CLI args on session create">
+          <input type="checkbox" class="args"> args</label>
+        <label title="run sessions in a docker container, no host access">
+          <input type="checkbox" class="sandbox"> sandbox</label>
+        <label title="user must enroll a 2FA factor before using the app">
+          <input type="checkbox" class="req2fa"> require 2FA</label>
+      </div>`;
+    const nm = tr.querySelector(".nm");
+    nm.textContent = u.name;
+    if(u.admin) nm.innerHTML += '<span class="badge">admin</span>';
+    if(u.has_2fa) nm.innerHTML +=
       '<span class="badge" style="color:var(--green);border-color:var(--green)" title="has 2FA enrolled">2fa</span>';
     const patch = body =>
       adminApi("PATCH","/api/users/"+encodeURIComponent(u.name), body)
