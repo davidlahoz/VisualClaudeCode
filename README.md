@@ -66,11 +66,10 @@ provisioning needs this script.
   account at session start. No host filesystem, no systemd, no docker socket.
   tmux still lives on the host, so sessions survive service restarts
   (`KillMode=process`).
-- TLS is terminated by `tailscale serve` with a real Let's Encrypt certificate
-  for the tailnet name — browsers show it as fully secure, and Tailscale
-  auto-renews it. The app itself listens on 127.0.0.1:7788 plain HTTP only.
-- Fallback: a self-signed cert lives in `certs/`; setting `VC_TLS=1` and
-  `VC_HOST=127.0.0.1` in the systemd unit serves HTTPS directly again.
+- TLS is terminated by Cloudflare; the app listens on 127.0.0.1:7788 plain
+  HTTP and is reachable only through the tunnel. A self-signed cert in
+  `certs/` plus `VC_TLS=1` / `VC_HOST=<addr>` in `.env` is a legacy
+  standalone-HTTPS fallback for non-Cloudflare deployments.
 
 ## Usage
 
@@ -102,16 +101,18 @@ with vendored xterm.js in `public/vendor/`. Host/port overridable via
 
 ## Security notes
 
-- The app binds 127.0.0.1 only; the sole way in is `tailscale serve` (tailnet
-  only — this is NOT Funnel, nothing is public). `tailscale serve status` to
-  inspect, `tailscale serve --https=443 off` to tear down.
-- Auth: scrypt password hashes, HMAC-signed session cookies (HttpOnly +
-  Secure), constant-time comparisons, 0.4s delay on failed login/register.
-  The invite token gates account creation. `users.json` and `.secret` are 0600
-  and gitignored. To reset a password, delete the user's entry from
-  `users.json` and re-register.
-- Anyone with the token effectively has shell access as root (Claude sessions
-  drop to bash on exit) — treat the token like an SSH key.
+- The app binds 127.0.0.1 only; the sole way in is the Cloudflare Tunnel,
+  which is outbound-only — there is no public inbound port on the host.
+  Cloudflare Access (Zero Trust) gates every request at the edge, and the app
+  re-validates the Access JWT itself.
+- In cloudflare mode identity comes from Access; the app's own accounts
+  auto-provision keyed to the verified email. In legacy `local` mode: scrypt
+  password hashes, HMAC-signed cookies (HttpOnly + Secure), constant-time
+  comparisons, optional TOTP/WebAuthn 2FA. `users.json` and `.secret` are 0600
+  and gitignored.
+- A session gives shell access as the host user (Claude sessions drop to bash
+  on exit) unless the user is sandboxed — so admin (`VCC_ADMIN_EMAILS`) and
+  the Access allow-list are the security boundary; guard both.
 
 ## License
 

@@ -70,8 +70,8 @@ def main():
     token = env.get("CLOUDFLARE_API_TOKEN")
     if not token:
         sys.exit("CLOUDFLARE_API_TOKEN missing from .env")
-    zone_name = env.get("VCC_ZONE", "example.com")
-    hostname = env.get("VCC_HOSTNAME", "vcc.example.com")
+    zone_name = env.get("VCC_ZONE") or sys.exit("VCC_ZONE missing from .env")
+    hostname = env.get("VCC_HOSTNAME") or sys.exit("VCC_HOSTNAME missing from .env")
     tunnel_name = env.get("VCC_TUNNEL_NAME", "vcc")
     port = env.get("VC_PORT", "7788")
     allowed = [e.strip() for e in

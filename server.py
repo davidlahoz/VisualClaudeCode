@@ -389,7 +389,7 @@ def totp_verify(secret_b32: str, code: str, window: int = 1) -> bool:
 
 
 # -------------------------------------------------------------- 2FA: WebAuthn
-RP_ID = os.environ.get("VC_RP_ID", "host.example.ts.net")
+RP_ID = os.environ.get("VC_RP_ID", "localhost")
 RP_ORIGIN = f"https://{RP_ID}"
 RP_NAME = "VisualClaudeCode"
 _challenges: dict = {}  # (kind, user) -> (challenge_bytes, expires_at)
