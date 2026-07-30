@@ -74,6 +74,46 @@ def is_admin(user: str) -> bool:
     return bool(load_users().get(user, {}).get("admin"))
 
 
+MODELS = ("sonnet", "opus", "haiku")
+SANDBOX_IMAGE = "visualclaude-sandbox"
+SANDBOX_ROOT = Path("/srv/visualclaude")
+HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
+
+
+def user_prefs(users: dict, user: str) -> dict:
+    rec = users.get(user, {})
+    return {
+        "model": rec.get("model") or None,          # pin sessions to a model
+        "allow_args": bool(rec.get("admin")) or bool(rec.get("allow_args")),
+        "sandbox": bool(rec.get("sandbox")),        # run in docker
+    }
+
+
+def sandbox_setup(user: str, model) -> Path:
+    """Prepare per-user sandbox dirs; returns the user's sandbox root."""
+    root = SANDBOX_ROOT / user
+    (root / "work").mkdir(parents=True, exist_ok=True)
+    cfg = root / "claude-config"
+    cfg.mkdir(exist_ok=True)
+    root.chmod(0o700)
+    # refresh OAuth credentials from the host account on every session start
+    if HOST_CREDS.exists():
+        dst = cfg / ".credentials.json"
+        dst.write_bytes(HOST_CREDS.read_bytes())
+        dst.chmod(0o600)
+    # ~/.claude.json holds onboarding state; persist it across --rm containers
+    cj = root / "claude.json"
+    if not cj.exists():
+        cj.write_text(json.dumps({"hasCompletedOnboarding": True}))
+    # hard-pin the model via managed settings inside the container:
+    # highest-precedence tier, not overridable by --model or /model
+    managed = ({"model": model, "availableModels": [model],
+                "enforceAvailableModels": True}
+               if model else {})
+    (root / "managed-settings.json").write_text(json.dumps(managed))
+    return root
+
+
 def hash_pw(password: str, salt: bytes) -> str:
     return hashlib.scrypt(password.encode(), salt=salt,
                           n=16384, r=8, p=1, dklen=32).hex()
@@ -267,9 +307,33 @@ async def admin_list_users(request):
     users = load_users()
     return web.json_response([
         {"name": u, "created": rec.get("created", 0),
-         "admin": bool(rec.get("admin"))}
+         "admin": bool(rec.get("admin")),
+         "model": rec.get("model") or "",
+         "allow_args": bool(rec.get("allow_args")),
+         "sandbox": bool(rec.get("sandbox"))}
         for u, rec in sorted(users.items())
     ])
+
+
+async def admin_update_user(request):
+    require_admin(request)
+    name = request.match_info["name"]
+    users = load_users()
+    if name not in users:
+        raise web.HTTPNotFound(text="no such user")
+    body = await request.json()
+    if "model" in body:
+        model = str(body["model"] or "")
+        if model and model not in MODELS:
+            raise web.HTTPBadRequest(
+                text=f"model must be one of {', '.join(MODELS)} or empty")
+        users[name]["model"] = model or None
+    if "allow_args" in body:
+        users[name]["allow_args"] = bool(body["allow_args"])
+    if "sandbox" in body:
+        users[name]["sandbox"] = bool(body["sandbox"])
+    save_users(users)
+    return web.json_response({"ok": True})
 
 
 async def admin_create_user(request):
@@ -299,6 +363,7 @@ async def admin_delete_user(request):
     for sess in out.stdout.splitlines():
         if sess.startswith(f"{PREFIX}{name}--"):
             tmux("kill-session", "-t", "=" + sess)
+            subprocess.run(["docker", "rm", "-f", sess], capture_output=True)
     return web.json_response({"ok": True})
 
 
@@ -356,32 +421,70 @@ async def list_sessions(request):
 
 
 async def create_session(request):
+    user = request["user"]
     body = await request.json()
     name = str(body.get("name", "")).strip()
-    cwd = str(body.get("cwd", "")).strip() or str(Path.home())
+    cwd = str(body.get("cwd", "")).strip()
     extra = str(body.get("args", "")).strip()  # e.g. --continue
     if not valid_name(name):
         raise web.HTTPBadRequest(text="name must be alphanumeric/-/_ (max 40)")
-    path = Path(cwd).expanduser()
-    if not path.is_absolute():
-        path = Path.home() / path
-    if path.exists() and not path.is_dir():
-        raise web.HTTPBadRequest(text=f"not a directory: {path}")
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise web.HTTPBadRequest(text=f"cannot create directory: {e}")
-    cwd = str(path)
-    target = user_target(request["user"], name)
+    prefs = user_prefs(load_users(), user)
+    if extra and not prefs["allow_args"]:
+        raise web.HTTPForbidden(text="claude args are not allowed for your account")
+
+    claude_cmd = "claude"
+    if prefs["model"]:
+        claude_cmd += f" --model {shlex.quote(prefs['model'])}"
+    if extra:
+        claude_cmd += " " + " ".join(shlex.quote(a) for a in shlex.split(extra))
+    # If claude exits, drop to a shell instead of killing the session.
+    claude_cmd += " ; exec bash"
+
+    target = user_target(user, name)
     if tmux("has-session", "-t", "=" + target).returncode == 0:
         raise web.HTTPConflict(text="session already exists")
-    # If claude exits, drop to a shell instead of killing the session.
-    cmd = "claude"
-    if extra:
-        cmd += " " + " ".join(shlex.quote(a) for a in shlex.split(extra))
-    cmd += " ; exec bash"
-    r = tmux("new-session", "-d", "-s", target, "-c", cwd,
-             "-x", "200", "-y", "50", cmd)
+
+    if prefs["sandbox"]:
+        # workspace confined to /work inside the container
+        root = sandbox_setup(user, prefs["model"])
+        sub = Path("/work").joinpath(cwd.lstrip("/")).resolve()
+        if not str(sub).startswith("/work"):
+            raise web.HTTPBadRequest(text="directory must be inside /work")
+        host_dir = root / "work" / str(sub)[len("/work"):].lstrip("/")
+        if host_dir.exists() and not host_dir.is_dir():
+            raise web.HTTPBadRequest(text=f"not a directory: {sub}")
+        host_dir.mkdir(parents=True, exist_ok=True)
+        # reap a stale container left over from a killed tmux session
+        subprocess.run(["docker", "rm", "-f", target], capture_output=True)
+        docker = [
+            "docker", "run", "--rm", "-it", "--name", target,
+            "--hostname", name, "--memory", "2g", "--cpus", "2",
+            "--pids-limit", "512",
+            "-v", f"{root / 'work'}:/work",
+            "-v", f"{root / 'claude-config'}:/root/.claude",
+            "-v", f"{root / 'claude.json'}:/root/.claude.json",
+            "-v", f"{root / 'managed-settings.json'}"
+                  ":/etc/claude-code/managed-settings.json:ro",
+            "-w", str(sub), SANDBOX_IMAGE,
+            "bash", "-c", claude_cmd,
+        ]
+        cmd = " ".join(shlex.quote(a) for a in docker)
+        cwd = str(sub)  # shown in the session list
+        r = tmux("new-session", "-d", "-s", target,
+                 "-x", "200", "-y", "50", cmd)
+    else:
+        path = Path(cwd or "~").expanduser()
+        if not path.is_absolute():
+            path = Path.home() / path
+        if path.exists() and not path.is_dir():
+            raise web.HTTPBadRequest(text=f"not a directory: {path}")
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise web.HTTPBadRequest(text=f"cannot create directory: {e}")
+        cwd = str(path)
+        r = tmux("new-session", "-d", "-s", target, "-c", cwd,
+                 "-x", "200", "-y", "50", claude_cmd)
     if r.returncode != 0:
         raise web.HTTPInternalServerError(text=r.stderr.strip() or "tmux failed")
     tmux("set-option", "-t", target, "status", "off")
@@ -394,9 +497,12 @@ async def kill_session(request):
     name = request.match_info["name"]
     if not valid_name(name):
         raise web.HTTPBadRequest(text="bad name")
-    r = tmux("kill-session", "-t", "=" + user_target(request["user"], name))
+    target = user_target(request["user"], name)
+    r = tmux("kill-session", "-t", "=" + target)
     if r.returncode != 0:
         raise web.HTTPNotFound(text=r.stderr.strip() or "no such session")
+    # tmux does not signal-proxy into docker with a tty; reap the container
+    subprocess.run(["docker", "rm", "-f", target], capture_output=True)
     return web.json_response({"ok": True})
 
 
@@ -523,6 +629,7 @@ def main():
     app.router.add_get("/api/me", me)
     app.router.add_get("/api/users", admin_list_users)
     app.router.add_post("/api/users", admin_create_user)
+    app.router.add_patch("/api/users/{name}", admin_update_user)
     app.router.add_delete("/api/users/{name}", admin_delete_user)
     app.router.add_get("/api/invites", admin_list_invites)
     app.router.add_post("/api/invites", admin_create_invite)
