@@ -1,4 +1,4 @@
-# VisualClaude
+# VisualClaudeCode
 
 Web client for running Claude Code on this machine. Every session is a tmux
 session (named `vc-<name>`) running `claude`, so conversations stay alive when
@@ -12,7 +12,7 @@ xterm.js) that attaches/detaches.
 - **App accounts**: sign in with username + password (scrypt-hashed in
   `users.json`); the signed session cookie keeps you logged in for 90 days.
   The very first account is bootstrapped by registering with the master token
-  from `/root/VisualClaude/.secret` and becomes **admin**; after that the
+  from `/root/VisualClaudeCode/.secret` and becomes **admin**; after that the
   master token no longer registers accounts.
 - **Admin panel** (button in the header for admins): list/create/delete users
   and mint one-time invite codes that let someone register themselves.
