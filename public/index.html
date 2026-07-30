@@ -157,7 +157,11 @@ main{flex:1;display:flex;min-height:0}
   <div id="sec" class="panel">
     <div style="display:flex;align-items:center;justify-content:space-between">
       <h3>Security</h3>
-      <button class="hbtn" onclick="document.getElementById('secoverlay').classList.remove('open')">close</button>
+      <button class="hbtn" id="secclose" onclick="document.getElementById('secoverlay').classList.remove('open')">close</button>
+    </div>
+    <div id="secnotice" style="display:none;border:1px solid var(--accent);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--accent)">
+      Your administrator requires two-factor authentication on this account.
+      Enroll an authenticator app or a security key below to continue.
     </div>
     <div>
       <h4>Authenticator app (TOTP)</h4>
@@ -367,6 +371,13 @@ fetch("/api/me").then(r => r.ok ? r.json() : null)
     if(m.admin) $("#adminbtn").style.display = "";
     if(!m.allow_args) $("#f-args").style.display = "none";
     if(m.sandbox) $("#f-cwd").placeholder = "folder in your workspace (created if missing)";
+    if(m.must_enroll_2fa){
+      $("#secnotice").style.display = "block";
+      $("#secclose").style.display = "none";
+      $("#secoverlay").classList.add("open");
+      $("#secoverlay").onclick = null;  // cannot dismiss until enrolled
+      secRefresh();
+    }
   }).catch(()=>{});
 
 /* ---------------- admin panel ---------------- */
@@ -394,10 +405,14 @@ async function adminRefresh(){
         <input type="checkbox" class="args"> args</label></td>
       <td><label title="run sessions in a docker container, no host access">
         <input type="checkbox" class="sandbox"> sandbox</label></td>
+      <td><label title="user must enroll a 2FA factor before using the app">
+        <input type="checkbox" class="req2fa"> 2FA</label></td>
       <td class="r"><button class="lnk r2fa">reset 2FA</button>
         <button class="lnk">delete</button></td>`;
     tr.children[0].textContent = u.name;
     if(u.admin) tr.children[0].innerHTML += '<span class="badge">admin</span>';
+    if(u.has_2fa) tr.children[0].innerHTML +=
+      '<span class="badge" style="color:var(--green);border-color:var(--green)" title="has 2FA enrolled">2fa</span>';
     const patch = body =>
       adminApi("PATCH","/api/users/"+encodeURIComponent(u.name), body)
         .then(adminRefresh);
@@ -411,6 +426,9 @@ async function adminRefresh(){
     const sb = tr.querySelector(".sandbox");
     sb.checked = u.sandbox;
     sb.onchange = () => patch({sandbox: sb.checked});
+    const rq = tr.querySelector(".req2fa");
+    rq.checked = u.require_2fa;
+    rq.onchange = () => patch({require_2fa: rq.checked});
     tr.querySelector(".r2fa").onclick = async () => {
       if(!confirm(`Remove all 2FA factors from "${u.name}"? They log in with password only until re-enrolling.`)) return;
       patch({reset_2fa: true});
@@ -493,10 +511,14 @@ $("#totp-enable").onclick = async () => {
   $("#qr").innerHTML = "";
   new QRCode($("#qr"), {text: uri, width: 168, height: 168});
 };
+const enrolledNow = () => {
+  if($("#secnotice").style.display !== "none"){ location.reload(); return true; }
+  return false;
+};
 $("#totp-confirm").onclick = async () => {
   await secApi("POST","/api/2fa/totp/confirm", {code: $("#totp-code").value});
   $("#totp-code").value = "";
-  secRefresh();
+  if(!enrolledNow()) secRefresh();
 };
 $("#totp-disable").onclick = async () => {
   await secApi("POST","/api/2fa/totp/disable", {code: $("#totp-dis-code").value});
@@ -511,7 +533,7 @@ $("#key-add").onclick = async () => {
     await secApi("POST","/api/2fa/webauthn/finish",
       {name: $("#key-name").value.trim(), credential: cred.toJSON()});
     $("#key-name").value = "";
-    secRefresh();
+    if(!enrolledNow()) secRefresh();
   }catch(e){ if(e) $("#secerr").textContent = e.message || "key registration failed"; }
 };
 refresh();
