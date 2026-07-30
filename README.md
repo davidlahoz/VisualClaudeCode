@@ -20,6 +20,27 @@ xterm.js) that attaches/detaches.
   revocable; consumed only on successful registration.
 - Each user only sees their own sessions — tmux sessions are namespaced
   `vc-<user>--<name>` and one user cannot list, attach, or kill another's.
+- **2FA** (optional, per user, via the "security" button): authenticator-app
+  TOTP codes (QR enrollment) and/or WebAuthn hardware keys / passkeys. With
+  any factor enrolled, login becomes password → second step (code or key).
+  Admins can strip a locked-out user's factors with "reset 2FA".
+
+## Per-user restrictions (admin panel)
+
+- **Model pin**: sessions launch with `--model X`. For sandboxed users this is
+  hard-enforced inside the container via a managed-settings.json mount
+  (`model` + `availableModels` + `enforceAvailableModels`) — `/model` cannot
+  escape it. For non-sandboxed users it's launch-time only (they have host
+  shell access anyway).
+- **args**: whether the "claude args" field on session create is honored
+  (admins always may).
+- **sandbox**: the user's sessions run inside the `visualclaude-sandbox`
+  docker image (built from `sandbox/Dockerfile`) with 2G RAM / 2 CPUs / 512
+  pids. They see only `/srv/visualclaude/<user>/work` (mounted at `/work`),
+  their own Claude config volume, and OAuth credentials seeded from the host
+  account at session start. No host filesystem, no systemd, no docker socket.
+  tmux still lives on the host, so sessions survive service restarts
+  (`KillMode=process`).
 - TLS is terminated by `tailscale serve` with a real Let's Encrypt certificate
   for the tailnet name — browsers show it as fully secure, and Tailscale
   auto-renews it. The app itself listens on 127.0.0.1:7788 plain HTTP only.

@@ -67,39 +67,38 @@ main{flex:1;display:flex;min-height:0}
 .hbtn{background:none;border:1px solid var(--border);color:var(--dim);
   border-radius:6px;padding:3px 9px;font:inherit;font-size:12px;cursor:pointer}
 .hbtn:hover{color:var(--fg)}
-/* admin panel */
-#overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;
+/* overlay panels (admin + security) */
+.ovl{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40;
   display:none;align-items:flex-start;justify-content:center;padding:40px 12px;
   overflow-y:auto}
-#overlay.open{display:flex}
-#admin{background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+.ovl.open{display:flex}
+.panel{background:var(--bg2);border:1px solid var(--border);border-radius:12px;
   width:min(560px,100%);padding:18px 20px;display:flex;flex-direction:column;gap:16px}
-#admin h3{margin:0;font-size:15px}
-#admin h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;
+.panel h3{margin:0;font-size:15px}
+.panel h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;
   letter-spacing:.12em;color:var(--dim)}
-#admin table{width:100%;border-collapse:collapse;font-size:13px}
-#admin td{padding:5px 6px;border-top:1px solid var(--border)}
-#admin td.r{text-align:right}
+.panel table{width:100%;border-collapse:collapse;font-size:13px}
+.panel td{padding:5px 6px;border-top:1px solid var(--border)}
+.panel td.r{text-align:right}
 .badge{font-size:10px;color:var(--accent);border:1px solid var(--accent);
   border-radius:4px;padding:1px 5px;margin-left:6px}
-#admin .row{display:flex;gap:6px}
-#admin input{flex:1;background:var(--panel);border:1px solid var(--border);
+.panel .row{display:flex;gap:6px}
+.panel input{flex:1;background:var(--panel);border:1px solid var(--border);
   border-radius:6px;padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;min-width:0}
-#admin input:focus{outline:none;border-color:var(--accent)}
-#admin select{background:var(--panel);border:1px solid var(--border);border-radius:6px;
+.panel input:focus{outline:none;border-color:var(--accent)}
+.panel select{background:var(--panel);border:1px solid var(--border);border-radius:6px;
   padding:3px 6px;color:var(--fg);font:inherit;font-size:12px}
-#admin label{font-size:12px;color:var(--dim);white-space:nowrap;cursor:pointer}
-#admin input[type=checkbox]{accent-color:var(--accent)}
-#admin .act{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
+.panel label{font-size:12px;color:var(--dim);white-space:nowrap;cursor:pointer}
+.panel input[type=checkbox]{accent-color:var(--accent)}
+.panel .act{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
   padding:7px 12px;font:inherit;font-weight:600;cursor:pointer;flex:none}
-#admin .lnk{background:none;border:none;color:var(--dim);cursor:pointer;
+.panel .lnk{background:none;border:none;color:var(--dim);cursor:pointer;
   font:inherit;font-size:12px;padding:2px 4px}
-#admin .lnk:hover{color:var(--red)}
-#admin .lnk.copy:hover{color:var(--green)}
-#admin code{background:var(--panel);padding:2px 6px;border-radius:4px;
+.panel .lnk:hover{color:var(--red)}
+.panel .lnk.copy:hover{color:var(--green)}
+.panel code{background:var(--panel);padding:2px 6px;border-radius:4px;
   user-select:all;word-break:break-all}
-#adminerr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
-#admin .close{align-self:flex-end;margin-top:-6px}
+.perr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
 @media(max-width:760px){
   #burger{display:block}
   #side{position:fixed;z-index:20;top:41px;bottom:0;left:0;transform:translateX(-100%);
@@ -115,6 +114,7 @@ main{flex:1;display:flex;min-height:0}
   <div id="conn">no session</div>
   <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
     <span id="who" style="color:var(--dim);font-size:12px"></span>
+    <button id="secbtn" class="hbtn">security</button>
     <button id="adminbtn" class="hbtn" style="display:none">admin</button>
     <form method="post" action="/logout" style="display:contents">
       <button class="hbtn">logout</button>
@@ -153,8 +153,48 @@ main{flex:1;display:flex;min-height:0}
     </div>
   </section>
 </main>
-<div id="overlay">
-  <div id="admin">
+<div id="secoverlay" class="ovl">
+  <div id="sec" class="panel">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <h3>Security</h3>
+      <button class="hbtn" onclick="document.getElementById('secoverlay').classList.remove('open')">close</button>
+    </div>
+    <div>
+      <h4>Authenticator app (TOTP)</h4>
+      <div id="totp-off" style="display:none">
+        <button class="act" id="totp-enable">Enable 2FA codes</button>
+      </div>
+      <div id="totp-setup" style="display:none">
+        <p style="font-size:13px;color:var(--dim);margin:6px 0">Scan with your
+          authenticator app, then enter the 6-digit code:</p>
+        <div id="qr" style="background:#fff;padding:10px;width:fit-content;border-radius:8px;margin:8px 0"></div>
+        <p style="font-size:12px;color:var(--dim)">manual key: <code id="totp-secret"></code></p>
+        <div class="row">
+          <input id="totp-code" placeholder="123456" inputmode="numeric" maxlength="6">
+          <button class="act" id="totp-confirm">Confirm</button>
+        </div>
+      </div>
+      <div id="totp-on" style="display:none">
+        <p style="font-size:13px;color:var(--green);margin:6px 0">✔ enabled — codes required at login</p>
+        <div class="row">
+          <input id="totp-dis-code" placeholder="current code to disable" inputmode="numeric" maxlength="6">
+          <button class="act" id="totp-disable">Disable</button>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h4>Hardware security keys / passkeys</h4>
+      <table><tbody id="keyrows"></tbody></table>
+      <div class="row" style="margin-top:8px">
+        <input id="key-name" placeholder="key name (e.g. yubikey)">
+        <button class="act" id="key-add">+ Register key</button>
+      </div>
+    </div>
+    <div id="secerr" class="perr"></div>
+  </div>
+</div>
+<div id="overlay" class="ovl">
+  <div id="admin" class="panel">
     <div style="display:flex;align-items:center;justify-content:space-between">
       <h3>Admin</h3>
       <button class="hbtn close" onclick="document.getElementById('overlay').classList.remove('open')">close</button>
@@ -175,9 +215,10 @@ main{flex:1;display:flex;min-height:0}
         <button class="act" id="ni-btn">+ New invite code</button>
       </div>
     </div>
-    <div id="adminerr"></div>
+    <div id="adminerr" class="perr"></div>
   </div>
 </div>
+<script src="/vendor/qrcode.js"></script>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/addon-weblinks.js"></script>
@@ -348,7 +389,8 @@ async function adminRefresh(){
         <input type="checkbox" class="args"> args</label></td>
       <td><label title="run sessions in a docker container, no host access">
         <input type="checkbox" class="sandbox"> sandbox</label></td>
-      <td class="r"><button class="lnk">delete</button></td>`;
+      <td class="r"><button class="lnk r2fa">reset 2FA</button>
+        <button class="lnk">delete</button></td>`;
     tr.children[0].textContent = u.name;
     if(u.admin) tr.children[0].innerHTML += '<span class="badge">admin</span>';
     const patch = body =>
@@ -364,7 +406,11 @@ async function adminRefresh(){
     const sb = tr.querySelector(".sandbox");
     sb.checked = u.sandbox;
     sb.onchange = () => patch({sandbox: sb.checked});
-    tr.querySelector(".lnk").onclick = async () => {
+    tr.querySelector(".r2fa").onclick = async () => {
+      if(!confirm(`Remove all 2FA factors from "${u.name}"? They log in with password only until re-enrolling.`)) return;
+      patch({reset_2fa: true});
+    };
+    tr.querySelector(".lnk:not(.r2fa)").onclick = async () => {
       if(!confirm(`Delete user "${u.name}" and kill all their sessions?`)) return;
       await adminApi("DELETE","/api/users/"+encodeURIComponent(u.name));
       adminRefresh();
@@ -400,6 +446,69 @@ $("#nu-btn").onclick = async () => {
   adminRefresh();
 };
 $("#ni-btn").onclick = async () => { await adminApi("POST","/api/invites"); adminRefresh(); };
+
+/* ---------------- security panel (2FA) ---------------- */
+async function secApi(method, path, body){
+  const r = await fetch(path, {method,
+    headers: body ? {"content-type":"application/json"} : {},
+    body: body ? JSON.stringify(body) : undefined});
+  if(!r.ok){ $("#secerr").textContent = await r.text(); throw 0; }
+  $("#secerr").textContent = "";
+  return r.json();
+}
+async function secRefresh(){
+  const st = await secApi("GET","/api/2fa");
+  $("#totp-setup").style.display = "none";
+  $("#totp-off").style.display = st.totp ? "none" : "block";
+  $("#totp-on").style.display = st.totp ? "block" : "none";
+  const kr = $("#keyrows"); kr.innerHTML = "";
+  for(const k of st.keys){
+    const tr = document.createElement("tr");
+    const d = new Date(k.created*1000).toISOString().slice(0,10);
+    tr.innerHTML = `<td></td><td style="color:var(--dim)">${d}</td>
+      <td class="r"><button class="lnk">remove</button></td>`;
+    tr.children[0].textContent = k.name;
+    tr.querySelector("button").onclick = async () => {
+      if(!confirm(`Remove key "${k.name}"?`)) return;
+      await secApi("DELETE","/api/2fa/webauthn/"+encodeURIComponent(k.id));
+      secRefresh();
+    };
+    kr.appendChild(tr);
+  }
+  if(!st.keys.length) kr.innerHTML =
+    '<tr><td style="color:var(--dim)">no keys registered</td></tr>';
+}
+$("#secbtn").onclick = () => { $("#secoverlay").classList.add("open"); secRefresh(); };
+$("#secoverlay").onclick = ev => { if(ev.target.id==="secoverlay") $("#secoverlay").classList.remove("open"); };
+$("#totp-enable").onclick = async () => {
+  const {secret, uri} = await secApi("POST","/api/2fa/totp/start");
+  $("#totp-off").style.display = "none";
+  $("#totp-setup").style.display = "block";
+  $("#totp-secret").textContent = secret;
+  $("#qr").innerHTML = "";
+  new QRCode($("#qr"), {text: uri, width: 168, height: 168});
+};
+$("#totp-confirm").onclick = async () => {
+  await secApi("POST","/api/2fa/totp/confirm", {code: $("#totp-code").value});
+  $("#totp-code").value = "";
+  secRefresh();
+};
+$("#totp-disable").onclick = async () => {
+  await secApi("POST","/api/2fa/totp/disable", {code: $("#totp-dis-code").value});
+  $("#totp-dis-code").value = "";
+  secRefresh();
+};
+$("#key-add").onclick = async () => {
+  try{
+    const opts = await secApi("POST","/api/2fa/webauthn/start");
+    const cred = await navigator.credentials.create(
+      {publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(opts)});
+    await secApi("POST","/api/2fa/webauthn/finish",
+      {name: $("#key-name").value.trim(), credential: cred.toJSON()});
+    $("#key-name").value = "";
+    secRefresh();
+  }catch(e){ if(e) $("#secerr").textContent = e.message || "key registration failed"; }
+};
 refresh();
 setInterval(refresh, 5000);
 window.addEventListener("beforeunload", () => { if(ws) ws.close(); });

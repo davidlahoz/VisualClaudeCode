@@ -16,12 +16,20 @@ import shlex
 import signal
 import ssl
 import struct
+import base64
 import subprocess
 import termios
 import time
 from pathlib import Path
 
 from aiohttp import web, WSMsgType
+from webauthn import (
+    generate_authentication_options, generate_registration_options,
+    options_to_json, verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
+from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 BASE = Path(__file__).resolve().parent
 HOST = os.environ.get("VC_HOST", "127.0.0.1")
@@ -31,6 +39,7 @@ SECRET_FILE = BASE / ".secret"
 CERT_FILE = BASE / "certs" / "cert.pem"
 KEY_FILE = BASE / "certs" / "key.pem"
 COOKIE = "vc_token"
+COOKIE_PRE = "vc_pre"
 
 if SECRET_FILE.exists():
     TOKEN = SECRET_FILE.read_text().strip()
@@ -155,6 +164,54 @@ def user_target(user: str, name: str) -> str:
     return f"{PREFIX}{user}--{name}"
 
 
+# ------------------------------------------------------------------ 2FA: TOTP
+def hotp(key: bytes, counter: int) -> str:
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0xF
+    code = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return f"{code % 1_000_000:06d}"
+
+
+def totp_verify(secret_b32: str, code: str, window: int = 1) -> bool:
+    try:
+        key = base64.b32decode(secret_b32)
+    except Exception:
+        return False
+    step = int(time.time()) // 30
+    code = code.strip().replace(" ", "")
+    return any(hmac.compare_digest(hotp(key, step + i), code)
+               for i in range(-window, window + 1))
+
+
+# -------------------------------------------------------------- 2FA: WebAuthn
+RP_ID = os.environ.get("VC_RP_ID", "host.example.ts.net")
+RP_ORIGIN = f"https://{RP_ID}"
+RP_NAME = "VisualClaude"
+_challenges: dict = {}  # (kind, user) -> (challenge_bytes, expires_at)
+
+
+def stash_challenge(kind: str, user: str, challenge: bytes):
+    now = time.time()
+    for k in [k for k, (_, exp) in _challenges.items() if exp < now]:
+        del _challenges[k]
+    _challenges[(kind, user)] = (challenge, now + 300)
+
+
+def pop_challenge(kind: str, user: str):
+    item = _challenges.pop((kind, user), None)
+    if item and item[1] > time.time():
+        return item[0]
+    return None
+
+
+def user_keys(rec: dict) -> list:
+    return rec.get("webauthn") or []
+
+
+def has_second_factor(rec: dict) -> bool:
+    return bool(rec.get("totp")) or bool(user_keys(rec))
+
+
 def tmux(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["tmux", *args], capture_output=True, text=True)
 
@@ -170,7 +227,7 @@ def valid_name(name: str) -> bool:
 async def auth_middleware(request, handler):
     path = request.path
     if path in ("/login", "/register", "/logout", "/favicon.ico") \
-            or path.startswith("/vendor/"):
+            or path.startswith("/login/") or path.startswith("/vendor/"):
         return await handler(request)
     user = request_user(request)
     if user is None:
@@ -231,14 +288,152 @@ async def login_get(request):
     return login_page()
 
 
+def sign_pre(user: str, exp: int) -> str:
+    return hmac.new(TOKEN.encode(), f"pre:{user}:{exp}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def pre_user(request: web.Request):
+    """Username from the short-lived pre-auth (password ok, 2FA pending)."""
+    parts = request.cookies.get(COOKIE_PRE, "").split(":")
+    if len(parts) != 3:
+        return None
+    user, exp, sig = parts
+    if not valid_name(user) or not exp.isdigit() or int(exp) < time.time():
+        return None
+    if not hmac.compare_digest(sig, sign_pre(user, int(exp))):
+        return None
+    return user
+
+
+TFA_HTML = """<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>VisualClaude — verify</title><style>
+body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
+background:#1a1915;color:#e8e2d5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+main{display:flex;flex-direction:column;gap:14px;width:min(340px,90vw)}
+h1{font-size:18px;font-weight:600;margin:0}h1 span{color:#d97757}
+input{background:#26241e;border:1px solid #3d3a30;border-radius:8px;padding:10px 12px;
+color:#e8e2d5;font:inherit;font-size:16px;text-align:center;letter-spacing:.3em;width:100%;box-sizing:border-box}
+input:focus{outline:none;border-color:#d97757}
+button{background:#d97757;border:none;border-radius:8px;padding:10px;color:#1a1915;
+font:inherit;font-weight:600;cursor:pointer;width:100%}
+button.alt{background:#26241e;color:#e8e2d5;border:1px solid #3d3a30}
+p.err{color:#e0655a;font-size:13px;margin:0;min-height:1em}
+form{display:flex;flex-direction:column;gap:10px;margin:0}</style></head><body><main>
+<h1><span>*</span> Two-factor verification</h1>
+__TOTP__
+__KEY__
+<p class=err id=err>__ERR__</p>
+<script>
+const err = m => document.getElementById('err').textContent = m;
+async function useKey(){
+  try{
+    const opts = await (await fetch('/login/webauthn/start',{method:'POST'})).json();
+    const cred = await navigator.credentials.get(
+      {publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(opts)});
+    const r = await fetch('/login/webauthn/finish',{method:'POST',
+      headers:{'content-type':'application/json'}, body: JSON.stringify(cred.toJSON())});
+    if(r.ok) location.href='/'; else err(await r.text());
+  }catch(e){ err(e.message || 'security key failed'); }
+}
+</script></main></body></html>"""
+
+
+def tfa_page(rec: dict, err: str = "", status: int = 200):
+    totp_form = ("""<form method=post action=/login/2fa>
+<input name=code inputmode=numeric autocomplete=one-time-code
+ placeholder="123456" maxlength=6 autofocus>
+<button>Verify code</button></form>""" if rec.get("totp") else "")
+    key_btn = ('<button class=alt onclick="useKey()">Use security key</button>'
+               if user_keys(rec) else "")
+    html = (TFA_HTML.replace("__TOTP__", totp_form)
+            .replace("__KEY__", key_btn).replace("__ERR__", err))
+    return web.Response(text=html, content_type="text/html", status=status)
+
+
 async def login_post(request):
     form = await request.post()
     user = str(form.get("user", "")).strip().lower()
     password = str(form.get("password", ""))
     await asyncio.sleep(0.4)  # blunt brute-force brake
-    if valid_name(user) and check_pw(load_users(), user, password):
+    users = load_users()
+    if not (valid_name(user) and check_pw(users, user, password)):
+        return login_page(err="wrong username or password", status=401)
+    rec = users[user]
+    if not has_second_factor(rec):
         return session_response(user)
-    return login_page(err="wrong username or password", status=401)
+    exp = int(time.time()) + 300
+    resp = tfa_page(rec)
+    resp.set_cookie(COOKIE_PRE, f"{user}:{exp}:{sign_pre(user, exp)}",
+                    max_age=300, httponly=True, samesite="Strict", secure=True)
+    return resp
+
+
+async def tfa_post(request):
+    user = pre_user(request)
+    if user is None:
+        raise web.HTTPFound("/login")
+    form = await request.post()
+    code = str(form.get("code", ""))
+    users = load_users()
+    rec = users.get(user) or {}
+    await asyncio.sleep(0.4)
+    if rec.get("totp") and totp_verify(rec["totp"], code):
+        resp = session_response(user)
+        resp.del_cookie(COOKIE_PRE)
+        return resp
+    return tfa_page(rec, err="wrong code", status=401)
+
+
+async def login_webauthn_start(request):
+    user = pre_user(request)
+    if user is None:
+        raise web.HTTPUnauthorized(text="expired, log in again")
+    keys = user_keys(load_users().get(user) or {})
+    if not keys:
+        raise web.HTTPBadRequest(text="no security keys registered")
+    opts = generate_authentication_options(
+        rp_id=RP_ID,
+        allow_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(k["id"]))
+            for k in keys],
+    )
+    stash_challenge("login", user, opts.challenge)
+    return web.json_response(json.loads(options_to_json(opts)))
+
+
+async def login_webauthn_finish(request):
+    user = pre_user(request)
+    if user is None:
+        raise web.HTTPUnauthorized(text="expired, log in again")
+    challenge = pop_challenge("login", user)
+    if challenge is None:
+        raise web.HTTPBadRequest(text="no pending challenge")
+    body = await request.text()
+    users = load_users()
+    rec = users.get(user) or {}
+    cred_id = json.loads(body).get("id", "")
+    key = next((k for k in user_keys(rec) if k["id"] == cred_id), None)
+    if key is None:
+        raise web.HTTPBadRequest(text="unknown credential")
+    try:
+        result = verify_authentication_response(
+            credential=body, expected_challenge=challenge,
+            expected_rp_id=RP_ID, expected_origin=RP_ORIGIN,
+            credential_public_key=base64url_to_bytes(key["public_key"]),
+            credential_current_sign_count=int(key.get("sign_count", 0)),
+        )
+    except Exception as e:
+        raise web.HTTPBadRequest(text=f"verification failed: {e}")
+    key["sign_count"] = result.new_sign_count
+    save_users(users)
+    resp = web.json_response({"ok": True})
+    resp.set_cookie(COOKIE, make_session_cookie(user),
+                    max_age=SESSION_DAYS * 86400,
+                    httponly=True, samesite="Strict", secure=True)
+    resp.del_cookie(COOKIE_PRE)
+    return resp
 
 
 def create_user(users: dict, user: str, password: str, admin: bool = False):
@@ -296,6 +491,109 @@ async def me(request):
                               "admin": is_admin(request["user"])})
 
 
+# ------------------------------------------------------------- 2fa self-service
+async def tfa_status(request):
+    rec = load_users().get(request["user"]) or {}
+    return web.json_response({
+        "totp": bool(rec.get("totp")),
+        "keys": [{"id": k["id"], "name": k.get("name", "key"),
+                  "created": k.get("created", 0)} for k in user_keys(rec)],
+    })
+
+
+async def totp_start(request):
+    user = request["user"]
+    users = load_users()
+    secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+    users[user]["totp_pending"] = secret
+    save_users(users)
+    uri = (f"otpauth://totp/VisualClaude:{user}?secret={secret}"
+           f"&issuer=VisualClaude&digits=6&period=30")
+    return web.json_response({"secret": secret, "uri": uri})
+
+
+async def totp_confirm(request):
+    user = request["user"]
+    body = await request.json()
+    users = load_users()
+    pending = users[user].get("totp_pending")
+    if not pending:
+        raise web.HTTPBadRequest(text="no pending TOTP setup")
+    if not totp_verify(pending, str(body.get("code", ""))):
+        raise web.HTTPBadRequest(text="wrong code, try again")
+    users[user]["totp"] = pending
+    users[user].pop("totp_pending", None)
+    save_users(users)
+    return web.json_response({"ok": True})
+
+
+async def totp_disable(request):
+    user = request["user"]
+    body = await request.json()
+    users = load_users()
+    current = users[user].get("totp")
+    if not current:
+        raise web.HTTPBadRequest(text="TOTP is not enabled")
+    if not totp_verify(current, str(body.get("code", ""))):
+        raise web.HTTPBadRequest(text="wrong code")
+    users[user].pop("totp", None)
+    save_users(users)
+    return web.json_response({"ok": True})
+
+
+async def webauthn_reg_start(request):
+    user = request["user"]
+    rec = load_users().get(user) or {}
+    opts = generate_registration_options(
+        rp_id=RP_ID, rp_name=RP_NAME,
+        user_id=user.encode(), user_name=user,
+        exclude_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(k["id"]))
+            for k in user_keys(rec)],
+    )
+    stash_challenge("reg", user, opts.challenge)
+    return web.json_response(json.loads(options_to_json(opts)))
+
+
+async def webauthn_reg_finish(request):
+    user = request["user"]
+    challenge = pop_challenge("reg", user)
+    if challenge is None:
+        raise web.HTTPBadRequest(text="no pending challenge")
+    body = await request.json()
+    name = str(body.get("name", "")).strip()[:40] or "security key"
+    try:
+        result = verify_registration_response(
+            credential=json.dumps(body.get("credential")),
+            expected_challenge=challenge,
+            expected_rp_id=RP_ID, expected_origin=RP_ORIGIN,
+        )
+    except Exception as e:
+        raise web.HTTPBadRequest(text=f"registration failed: {e}")
+    users = load_users()
+    users[user].setdefault("webauthn", []).append({
+        "id": bytes_to_base64url(result.credential_id),
+        "public_key": bytes_to_base64url(result.credential_public_key),
+        "sign_count": result.sign_count,
+        "name": name, "created": int(time.time()),
+    })
+    save_users(users)
+    return web.json_response({"ok": True}, status=201)
+
+
+async def webauthn_delete(request):
+    user = request["user"]
+    cred_id = request.match_info["id"]
+    users = load_users()
+    keys = user_keys(users.get(user) or {})
+    remaining = [k for k in keys if k["id"] != cred_id]
+    if len(remaining) == len(keys):
+        raise web.HTTPNotFound(text="no such key")
+    users[user]["webauthn"] = remaining
+    save_users(users)
+    return web.json_response({"ok": True})
+
+
 # ---------------------------------------------------------------- admin api
 def require_admin(request):
     if not is_admin(request["user"]):
@@ -332,6 +630,9 @@ async def admin_update_user(request):
         users[name]["allow_args"] = bool(body["allow_args"])
     if "sandbox" in body:
         users[name]["sandbox"] = bool(body["sandbox"])
+    if body.get("reset_2fa"):  # lockout recovery
+        for k in ("totp", "totp_pending", "webauthn"):
+            users[name].pop(k, None)
     save_users(users)
     return web.json_response({"ok": True})
 
@@ -626,6 +927,16 @@ def main():
     app.router.add_post("/login", login_post)
     app.router.add_post("/register", register_post)
     app.router.add_post("/logout", logout_post)
+    app.router.add_post("/login/2fa", tfa_post)
+    app.router.add_post("/login/webauthn/start", login_webauthn_start)
+    app.router.add_post("/login/webauthn/finish", login_webauthn_finish)
+    app.router.add_get("/api/2fa", tfa_status)
+    app.router.add_post("/api/2fa/totp/start", totp_start)
+    app.router.add_post("/api/2fa/totp/confirm", totp_confirm)
+    app.router.add_post("/api/2fa/totp/disable", totp_disable)
+    app.router.add_post("/api/2fa/webauthn/start", webauthn_reg_start)
+    app.router.add_post("/api/2fa/webauthn/finish", webauthn_reg_finish)
+    app.router.add_delete("/api/2fa/webauthn/{id}", webauthn_delete)
     app.router.add_get("/api/me", me)
     app.router.add_get("/api/users", admin_list_users)
     app.router.add_post("/api/users", admin_create_user)
