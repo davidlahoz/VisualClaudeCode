@@ -7,15 +7,14 @@ xterm.js) that attaches/detaches.
 
 ## Access
 
-- URL: **https://host.example.ts.net** (tailnet only)
-- **No login needed from the tailnet**: `tailscale serve` injects the verified
-  `Tailscale-User-Login` identity header (and strips spoofed ones), so you land
-  straight in the app, identified by your tailnet account. Each user gets their
-  own session list — tmux sessions are namespaced `vc-<user>--<name>` and one
-  user cannot see or touch another's.
-- Token fallback: `/root/VisualClaude/.secret` still works via the login page
-  or a `vc_token` cookie (used for scripts / direct localhost access); it maps
-  to the user in `VC_DEFAULT_USER` (systemd unit).
+- URL: **https://host.example.ts.net** (tailnet only — Tailscale is
+  purely the network layer, it knows nothing about app users)
+- **App accounts**: register on the login page with the invite token from
+  `/root/VisualClaude/.secret` plus a username and password (scrypt-hashed in
+  `users.json`). After that, sign in with username + password; the signed
+  session cookie keeps you logged in for 90 days. Logout button in the header.
+- Each user only sees their own sessions — tmux sessions are namespaced
+  `vc-<user>--<name>` and one user cannot list, attach, or kill another's.
 - TLS is terminated by `tailscale serve` with a real Let's Encrypt certificate
   for the tailnet name — browsers show it as fully secure, and Tailscale
   auto-renews it. The app itself listens on 127.0.0.1:7788 plain HTTP only.
@@ -55,6 +54,10 @@ with vendored xterm.js in `public/vendor/`. Host/port overridable via
 - The app binds 127.0.0.1 only; the sole way in is `tailscale serve` (tailnet
   only — this is NOT Funnel, nothing is public). `tailscale serve status` to
   inspect, `tailscale serve --https=443 off` to tear down.
-- Token auth on every route (constant-time compare, HttpOnly + Secure cookie).
+- Auth: scrypt password hashes, HMAC-signed session cookies (HttpOnly +
+  Secure), constant-time comparisons, 0.4s delay on failed login/register.
+  The invite token gates account creation. `users.json` and `.secret` are 0600
+  and gitignored. To reset a password, delete the user's entry from
+  `users.json` and re-register.
 - Anyone with the token effectively has shell access as root (Claude sessions
   drop to bash on exit) — treat the token like an SSH key.

@@ -10,6 +10,7 @@ import fcntl
 import hmac
 import json
 import os
+import hashlib
 import secrets
 import shlex
 import signal
@@ -17,6 +18,7 @@ import ssl
 import struct
 import subprocess
 import termios
+import time
 from pathlib import Path
 
 from aiohttp import web, WSMsgType
@@ -38,34 +40,57 @@ else:
     SECRET_FILE.chmod(0o600)
 
 
-def authed(request: web.Request) -> bool:
-    tok = request.cookies.get(COOKIE, "")
-    return hmac.compare_digest(tok, TOKEN)
+# --------------------------------------------------------------- user accounts
+USERS_FILE = BASE / "users.json"
+SESSION_DAYS = 90
 
 
-def slug(login: str) -> str:
-    """admin@example.com -> admin"""
-    s = login.split("@")[0].lower()
-    s = "".join(c for c in s if c.isalnum() or c in "-_")
-    return s[:24] or "user"
+def load_users() -> dict:
+    if USERS_FILE.exists():
+        return json.loads(USERS_FILE.read_text())
+    return {}
 
 
-DEFAULT_USER = slug(os.environ.get("VC_DEFAULT_USER", "main"))
+def save_users(users: dict):
+    USERS_FILE.write_text(json.dumps(users, indent=2))
+    USERS_FILE.chmod(0o600)
+
+
+def hash_pw(password: str, salt: bytes) -> str:
+    return hashlib.scrypt(password.encode(), salt=salt,
+                          n=16384, r=8, p=1, dklen=32).hex()
+
+
+def check_pw(users: dict, username: str, password: str) -> bool:
+    rec = users.get(username)
+    if not rec:
+        hash_pw(password, b"x" * 16)  # constant-time-ish: still do the work
+        return False
+    return hmac.compare_digest(hash_pw(password, bytes.fromhex(rec["salt"])),
+                               rec["hash"])
+
+
+def sign_session(user: str, exp: int) -> str:
+    return hmac.new(TOKEN.encode(), f"{user}:{exp}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def make_session_cookie(user: str) -> str:
+    exp = int(time.time()) + SESSION_DAYS * 86400
+    return f"{user}:{exp}:{sign_session(user, exp)}"
 
 
 def request_user(request: web.Request):
-    """Identity of the caller, or None if unauthenticated.
-
-    tailscale serve injects Tailscale-User-Login for tailnet traffic and
-    strips any client-supplied copy, so the header is trustworthy. Requests
-    not via serve (local curl) fall back to token auth as DEFAULT_USER.
-    """
-    login = request.headers.get("Tailscale-User-Login", "").strip()
-    if login:
-        return slug(login)
-    if authed(request):
-        return DEFAULT_USER
-    return None
+    """Username from the signed session cookie, or None."""
+    parts = request.cookies.get(COOKIE, "").split(":")
+    if len(parts) != 3:
+        return None
+    user, exp, sig = parts
+    if not valid_name(user) or not exp.isdigit() or int(exp) < time.time():
+        return None
+    if not hmac.compare_digest(sig, sign_session(user, int(exp))):
+        return None
+    return user
 
 
 def user_target(user: str, name: str) -> str:
@@ -86,7 +111,8 @@ def valid_name(name: str) -> bool:
 @web.middleware
 async def auth_middleware(request, handler):
     path = request.path
-    if path == "/login" or path.startswith("/vendor/") or path == "/favicon.ico":
+    if path in ("/login", "/register", "/logout", "/favicon.ico") \
+            or path.startswith("/vendor/"):
         return await handler(request)
     user = request_user(request)
     if user is None:
@@ -103,39 +129,88 @@ LOGIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <title>VisualClaude — login</title><style>
 body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
 background:#1a1915;color:#e8e2d5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-form{display:flex;flex-direction:column;gap:12px;width:min(340px,90vw)}
+main{display:flex;flex-direction:column;gap:12px;width:min(340px,90vw)}
+form{display:flex;flex-direction:column;gap:12px}
 h1{font-size:18px;font-weight:600;margin:0 0 4px}h1 span{color:#d97757}
 input{background:#26241e;border:1px solid #3d3a30;border-radius:8px;padding:10px 12px;
 color:#e8e2d5;font:inherit;font-size:14px}input:focus{outline:none;border-color:#d97757}
 button{background:#d97757;border:none;border-radius:8px;padding:10px;color:#1a1915;
 font:inherit;font-weight:600;cursor:pointer}button:hover{background:#e08b6e}
-p.err{color:#e0655a;font-size:13px;margin:0;min-height:1em}</style></head><body>
+p.err{color:#e0655a;font-size:13px;margin:0;min-height:1em}
+details{border-top:1px solid #3d3a30;padding-top:12px}
+summary{color:#8a8578;cursor:pointer;font-size:13px;margin-bottom:10px}
+details button{background:#26241e;color:#e8e2d5;border:1px solid #3d3a30}
+</style></head><body><main>
 <form method=post action=/login>
 <h1><span>*</span> VisualClaude</h1>
-<input name=token type=password placeholder="access token" autofocus autocomplete=current-password>
-<button>Enter</button><p class=err>__ERR__</p></form></body></html>"""
+<input name=user placeholder="username" autofocus autocomplete=username>
+<input name=password type=password placeholder="password" autocomplete=current-password>
+<button>Sign in</button><p class=err>__ERR__</p></form>
+<details __OPEN__><summary>Create account</summary>
+<form method=post action=/register>
+<input name=invite type=password placeholder="invite token" autocomplete=off>
+<input name=user placeholder="username (a-z 0-9 - _)" autocomplete=username>
+<input name=password type=password placeholder="password (min 8 chars)" autocomplete=new-password>
+<button>Register</button><p class=err>__RERR__</p></form></details>
+</main></body></html>"""
+
+
+def login_page(err="", rerr="", status=200):
+    html = (LOGIN_HTML.replace("__ERR__", err).replace("__RERR__", rerr)
+            .replace("__OPEN__", "open" if rerr else ""))
+    return web.Response(text=html, content_type="text/html", status=status)
+
+
+def session_response(user: str) -> web.Response:
+    resp = web.HTTPFound("/")
+    resp.set_cookie(COOKIE, make_session_cookie(user),
+                    max_age=SESSION_DAYS * 86400,
+                    httponly=True, samesite="Strict", secure=True)
+    return resp
 
 
 async def login_get(request):
-    return web.Response(
-        text=LOGIN_HTML.replace("__ERR__", ""), content_type="text/html"
-    )
+    return login_page()
 
 
 async def login_post(request):
     form = await request.post()
-    tok = str(form.get("token", ""))
-    if hmac.compare_digest(tok, TOKEN):
-        resp = web.HTTPFound("/")
-        resp.set_cookie(
-            COOKIE, TOKEN, max_age=60 * 60 * 24 * 90,
-            httponly=True, samesite="Strict", secure=True,
-        )
-        return resp
-    return web.Response(
-        text=LOGIN_HTML.replace("__ERR__", "wrong token"),
-        content_type="text/html", status=401,
-    )
+    user = str(form.get("user", "")).strip().lower()
+    password = str(form.get("password", ""))
+    await asyncio.sleep(0.4)  # blunt brute-force brake
+    if valid_name(user) and check_pw(load_users(), user, password):
+        return session_response(user)
+    return login_page(err="wrong username or password", status=401)
+
+
+async def register_post(request):
+    form = await request.post()
+    invite = str(form.get("invite", ""))
+    user = str(form.get("user", "")).strip().lower()
+    password = str(form.get("password", ""))
+    await asyncio.sleep(0.4)
+    if not hmac.compare_digest(invite, TOKEN):
+        return login_page(rerr="wrong invite token", status=403)
+    if not valid_name(user):
+        return login_page(rerr="username: a-z, 0-9, - and _ only (max 40)",
+                          status=400)
+    if len(password) < 8:
+        return login_page(rerr="password must be at least 8 characters",
+                          status=400)
+    users = load_users()
+    if user in users:
+        return login_page(rerr="username already taken", status=409)
+    salt = secrets.token_bytes(16)
+    users[user] = {"salt": salt.hex(), "hash": hash_pw(password, salt),
+                   "created": int(time.time())}
+    save_users(users)
+    return session_response(user)
+
+
+async def logout_post(request):
+    resp = web.HTTPFound("/login")
+    resp.del_cookie(COOKIE)
+    return resp
 
 
 # ---------------------------------------------------------------- session api
@@ -325,21 +400,13 @@ async def index(request):
     return web.FileResponse(BASE / "public" / "index.html")
 
 
-def migrate_legacy_sessions():
-    """Rename pre-multiuser sessions vc-<name> to vc-<DEFAULT_USER>--<name>."""
-    out = tmux("list-sessions", "-F", "#{session_name}")
-    for sess in out.stdout.splitlines():
-        if sess.startswith(PREFIX) and "--" not in sess[len(PREFIX):]:
-            tmux("rename-session", "-t", "=" + sess,
-                 user_target(DEFAULT_USER, sess[len(PREFIX):]))
-
-
 def main():
-    migrate_legacy_sessions()
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", index)
     app.router.add_get("/login", login_get)
     app.router.add_post("/login", login_post)
+    app.router.add_post("/register", register_post)
+    app.router.add_post("/logout", logout_post)
     app.router.add_get("/api/me", me)
     app.router.add_get("/api/sessions", list_sessions)
     app.router.add_post("/api/sessions", create_session)
