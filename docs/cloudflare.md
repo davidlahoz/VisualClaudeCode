@@ -27,9 +27,15 @@ therefore be scoped tightly. Everything this project ever does needs at most:
 | Account | Cloudflare Tunnel | Edit | create/configure the tunnel, fetch its run token |
 | Account | Access: Apps and Policies | Edit | Access app + allow policy (add/remove users) |
 | Account | Access: Organizations, Identity Providers, and Groups | Edit | team domain + login method — **one-time**, drop after setup |
+| Zone (example.com) | Zone | Read | look up the zone/account id (`scripts/deploy.py`) |
 | Zone (example.com) | DNS | Edit | the `vcc` CNAME |
 | Zone (example.com) | Zone Settings | Edit | min TLS version, Always Use HTTPS — **one-time** |
 | Zone (example.com) | Zone WAF | Edit | rate-limiting/WAF rules — **one-time** |
+
+Set **Zone Resources → Include → Specific zone → example.com** so the token
+touches nothing else. Nothing in the running app calls the Cloudflare API —
+the token is only read by `scripts/deploy.py`, so it can be removed from `.env`
+between deployments.
 
 Recommended steady-state token (day-to-day user management only):
 **Access: Apps and Policies (Edit)** + **Cloudflare Tunnel (Read)**. Everything
