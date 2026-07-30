@@ -8,4 +8,6 @@ users.json
 invites.json
 .claude/
 sessions.json
+settings.json
+resurrect.json
 .env
