@@ -15,13 +15,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Diagnose token (temporary)
-        env:
-          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
-        run: |
-          echo "token belongs to: $(gh api user -q .login || echo INVALID)"
-          echo "fork visible: $(gh api repos/pure11-GmbH/VisualClaude -q .full_name || echo NO)"
+          # Without this, checkout bakes the workflow's GITHUB_TOKEN into
+          # git config as an extraheader, which overrides the push URL's
+          # credentials and has no access to the fork.
+          persist-credentials: false
 
       # Fast-forward only: if the fork's main has diverged, this fails
       # instead of overwriting the team's commits.
