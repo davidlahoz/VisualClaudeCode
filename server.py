@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VisualClaude — web frontend for Claude Code sessions kept alive in tmux.
+"""VisualClaudeCode — web frontend for Claude Code sessions kept alive in tmux.
 
 Each session is a tmux session named vc-<name> running `claude`. The browser
 talks to this server over HTTP/WebSocket; the server bridges a PTY running
@@ -85,7 +85,7 @@ def is_admin(user: str) -> bool:
 
 
 MODELS = ("sonnet", "opus", "haiku")
-SANDBOX_IMAGE = "visualclaude-sandbox"
+SANDBOX_IMAGE = "visualclaudecode-sandbox"
 SANDBOX_ROOT = Path("/srv/visualclaude")
 HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
 
@@ -233,7 +233,7 @@ def totp_verify(secret_b32: str, code: str, window: int = 1) -> bool:
 # -------------------------------------------------------------- 2FA: WebAuthn
 RP_ID = os.environ.get("VC_RP_ID", "host.example.ts.net")
 RP_ORIGIN = f"https://{RP_ID}"
-RP_NAME = "VisualClaude"
+RP_NAME = "VisualClaudeCode"
 _challenges: dict = {}  # (kind, user) -> (challenge_bytes, expires_at)
 
 
@@ -288,7 +288,7 @@ async def auth_middleware(request, handler):
 # ---------------------------------------------------------------- auth pages
 LOGIN_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>VisualClaude — login</title><style>
+<title>VisualClaudeCode — login</title><style>
 body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
 background:#1a1915;color:#e8e2d5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 main{display:flex;flex-direction:column;gap:12px;width:min(340px,90vw)}
@@ -304,7 +304,7 @@ summary{color:#8a8578;cursor:pointer;font-size:13px;margin-bottom:10px}
 details button{background:#26241e;color:#e8e2d5;border:1px solid #3d3a30}
 </style></head><body><main>
 <form method=post action=/login>
-<h1><span>*</span> VisualClaude</h1>
+<h1><span>*</span> VisualClaudeCode</h1>
 <input name=user placeholder="username" autofocus autocomplete=username>
 <input name=password type=password placeholder="password" autocomplete=current-password>
 <button>Sign in</button><p class=err>__ERR__</p></form>
@@ -355,7 +355,7 @@ def pre_user(request: web.Request):
 
 TFA_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>VisualClaude — verify</title><style>
+<title>VisualClaudeCode — verify</title><style>
 body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
 background:#1a1915;color:#e8e2d5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 main{display:flex;flex-direction:column;gap:14px;width:min(340px,90vw)}
@@ -558,8 +558,8 @@ async def totp_start(request):
     secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
     users[user]["totp_pending"] = secret
     save_users(users)
-    uri = (f"otpauth://totp/VisualClaude:{user}?secret={secret}"
-           f"&issuer=VisualClaude&digits=6&period=30")
+    uri = (f"otpauth://totp/VisualClaudeCode:{user}?secret={secret}"
+           f"&issuer=VisualClaudeCode&digits=6&period=30")
     return web.json_response({"secret": secret, "uri": uri})
 
 
@@ -1018,7 +1018,7 @@ def main():
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)
         scheme = "https"
-    print(f"VisualClaude on {scheme}://{HOST}:{PORT}  (token in {SECRET_FILE})")
+    print(f"VisualClaudeCode on {scheme}://{HOST}:{PORT}  (token in {SECRET_FILE})")
     web.run_app(app, host=HOST, port=PORT, ssl_context=ssl_ctx, print=None)
 
 
