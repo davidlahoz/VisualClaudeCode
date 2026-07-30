@@ -7,26 +7,17 @@ xterm.js) that attaches/detaches.
 
 ## Access
 
-- URL: **https://host.example.ts.net** (tailnet only — Tailscale is
-  purely the network layer, it knows nothing about app users)
-- **App accounts**: sign in with username + password (scrypt-hashed in
-  `users.json`); the signed session cookie keeps you logged in for 90 days.
-  The very first account is bootstrapped by registering with the master token
-  from `/root/VisualClaudeCode/.secret` and becomes **admin**; after that the
-  master token no longer registers accounts.
-- **Admin panel** (button in the header for admins): list/create/delete users
-  and mint one-time invite codes that let someone register themselves.
-  Deleting a user also kills all their tmux sessions. Codes are single-use and
-  revocable; consumed only on successful registration.
-- Each user only sees their own sessions — tmux sessions are namespaced
-  `vc-<user>--<name>` and one user cannot list, attach, or kill another's.
-- **2FA** (optional, per user, via the "security" button): authenticator-app
-  TOTP codes (QR enrollment) and/or WebAuthn hardware keys / passkeys. With
-  any factor enrolled, login becomes password → second step (code or key).
-  Admins can strip a locked-out user's factors with "reset 2FA", and can
-  check "2FA" on a user to make enrollment mandatory: until that user adds a
-  factor, the API serves them nothing but the security endpoints and the UI
-  pins them in the enrollment panel.
+- URL: **https://vcc.example.com** — published via a Cloudflare Tunnel
+  (outbound-only; no inbound port on the server) and gated by **Cloudflare
+  Access (Zero Trust)**. Login is your Cloudflare Access identity (Google
+  SSO); only emails allowed by the Access policy get in. See
+  [docs/cloudflare.md](docs/cloudflare.md).
+- The app independently validates the Access JWT (signature via team JWKS,
+  audience, issuer, expiry) on every request; user records auto-provision
+  keyed to the Access identity. Admins = `VCC_ADMIN_EMAILS` in `.env`.
+- Legacy standalone mode (`VCC_AUTH=local`): username/password accounts with
+  optional TOTP/WebAuthn 2FA, invite codes, and self-served TLS — still in
+  the codebase for deployments without Cloudflare.
 
 ## Per-user restrictions (admin panel)
 

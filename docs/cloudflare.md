@@ -51,7 +51,11 @@ the Access identity. Admins are the emails in `VCC_ADMIN_EMAILS`.
 ## Edge hardening applied
 
 - Access allow-list policy (default-deny for everyone else).
-- Rate limiting rule on `vcc.example.com` at the edge.
+- Rate limiting: the free plan's single rate-limiting rule slot is occupied
+  by a pre-existing zone-wide "Leaked credential check" rule, which was kept.
+  A per-host rule for `vcc` can replace it if preferred.
+- Browser Integrity Check on; security level medium. Bot Fight Mode can be
+  toggled manually (needs the Zone Bot Management permission).
 - Minimum TLS 1.2 and Always Use HTTPS on the zone.
 - Origin bound to loopback; TLS terminated by Cloudflare; tunnel is
   outbound-only.
