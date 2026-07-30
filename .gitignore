@@ -6,3 +6,4 @@ __pycache__/
 .claude/settings.local.json
 users.json
 invites.json
+.claude/
