@@ -129,6 +129,82 @@ with vendored xterm.js in `public/vendor/`. Host/port overridable via
   on exit) unless the user is sandboxed — so admin (`VCC_ADMIN_EMAILS`) and
   the Access allow-list are the security boundary; guard both.
 
+## Security review (2026-08-10)
+
+Findings from a read of `server.py`, `scripts/deploy.py`, `public/index.html`
+and the sandbox image against the deployed configuration. Cloudflare Access
+gates everything, so none of these are reachable pre-auth — they are
+post-authentication or host-local. **None are fixed yet**; this is the
+hardening backlog, not a description of the current defences.
+
+### Fix first
+
+- **`.env` backups are not gitignored.** `.gitignore` covers `.env` but not
+  `.env.bak*`, so a stray backup holding `CLOUDFLARE_API_TOKEN` gets picked up
+  by `git add -A`. Ignore `.env*` (with `!.env.example`) and delete any
+  backup. Nothing secret is in the history today.
+- **No `Origin` check on the WebSocket, and no CSRF defence** (`ws_terminal`).
+  `/ws/<name>` accepts an upgrade from any origin and authorises purely on the
+  `CF_Authorization` cookie; WebSockets are not covered by CORS, so a page the
+  signed-in user visits can attach to a live session and both read and write
+  the terminal. The only thing in the way is the cookie's SameSite attribute,
+  and `scripts/deploy.py` sets `http_only_cookie_attribute` but never
+  `same_site_cookie_attribute` — so it rests on each browser's Lax-by-default.
+  `POST /api/sessions` is reachable the same way (a `text/plain` body skips
+  the preflight). Reject requests whose `Origin` is not
+  `https://$VCC_HOSTNAME`, and set `same_site_cookie_attribute: "strict"` when
+  provisioning the Access app.
+- **Sandboxed users get the host's Anthropic OAuth credentials.**
+  `sandbox_setup` copies `~/.claude/.credentials.json` into every user's
+  config volume, mounted at `/root/.claude` in a container that drops to a
+  root shell and has unrestricted egress, so a sandboxed user can read and
+  exfiltrate the account's access + refresh token. The sandbox protects the
+  host filesystem, **not** the Claude account — until per-user credentials
+  exist, a sandboxed user is someone you trust with the account.
+- **Auto-provisioned users default to non-sandboxed, i.e. root on the host.**
+  `ensure_cf_user` writes no `sandbox` key, so `user_prefs` yields `False`:
+  the moment an email is added to the Access policy that person gets a root
+  shell and can read `.env`, `.secret`, `users.json`, `~/.ssh` and every repo
+  on the box. Default new records to `sandbox: true` and let an admin turn it
+  off deliberately.
+- **`CLOUDFLARE_API_TOKEN` reaches every session's environment.**
+  `_load_env()` pushes all of `.env` into `os.environ` and the tmux server
+  inherits it, so `tmux show-environment -g` returns the token and every
+  `claude` process on the host can read it from `/proc/self/environ` — a
+  prompt-injected session included. It does not cross into docker sandboxes.
+  `server.py` never uses the variable (it is deploy-only), so popping it right
+  after `_load_env()` costs nothing.
+
+### Minor
+
+- Sandbox sessions are created without `-c`, so tmux reports the server's own
+  working directory and `/api/sessions` hands the install path to a user who
+  should only ever know `/work`. Return the stored `container_cwd` instead.
+- Raw `OSError`, `tmux` and `docker` stderr and WebAuthn exception text are
+  returned to the client, carrying host paths. Only reachable by users who
+  already have host access, but generic text plus a server-side log is the
+  better default.
+- `sessions.json`, `settings.json` and `resurrect.json` are `0644` while
+  `.env`, `.secret` and `users.json` are correctly `0600`. `sessions.json`
+  holds usernames, host paths and full restore commands.
+- `GET /api/persist` is the one route missing its `require_admin` — any
+  authenticated user learns the snapshot interval and last-save time.
+- Sandbox containers use default bridge networking, so they can reach the
+  docker gateway, the host's Tailscale address (and thus its `sshd`) and the
+  open internet. The app itself is loopback-only, as is `cloudflared`.
+
+### Verified sound
+
+Recorded so a later change does not quietly undo them: the Access JWT check
+pins RS256 and requires `exp`/`iat`/`aud`/`iss`, with no cookie fallback in
+cloudflare mode; `email_slug` binds the readable prefix to a SHA-256 of the
+exact address and `ensure_cf_user` refuses on mismatch; banning `--` in names
+keeps session-ownership parsing unambiguous, so no user can address another's
+sessions; `safe_join`, `rmtree_confined` and the `O_NOFOLLOW|O_EXCL`
+credential write defeat symlinks planted from inside the sandbox; the frontend
+uses `textContent` for every server-supplied string; static serving is limited
+to `/vendor/`; and no secret has ever been committed.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Vendored frontend libraries (xterm.js,
