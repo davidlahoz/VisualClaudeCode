@@ -516,7 +516,47 @@ def has_second_factor(rec: dict) -> bool:
     return bool(rec.get("totp")) or bool(user_keys(rec))
 
 
+# tmux silently starts a BRAND-NEW server for these commands when the socket is
+# missing or stale -- and in this container that server, plus every session it
+# owns, comes up INSIDE the container, where the host's `claude` binary and the
+# user's working directories do not exist. That is not hypothetical: it is
+# exactly what happened between 2026-09-07 and 2026-09-10, when the host's
+# tmux-server.service was failing on every boot and `new-session` cheerfully
+# returned rc=0 after spawning a rogue in-container server.
+#
+# Read-only commands need no guard -- show-options, has-session and
+# list-sessions all just fail against a dead socket rather than starting a
+# server -- so only the server-starting ones are listed here, under both their
+# full names and their tmux aliases.
+_STARTS_SERVER = frozenset({
+    "new-session", "new", "start-server", "start", "source-file", "source",
+})
+
+
+def tmux_server_alive() -> bool:
+    """True if a tmux server actually answers on the socket.
+
+    `show-options -g` is the correct probe: it round-trips to the server, it
+    succeeds even when the server holds zero sessions (unlike has-session), and
+    it is not a server-starting command -- so probing can never create the very
+    thing it is meant to detect.
+    """
+    return subprocess.run(
+        ["tmux", "show-options", "-g", "exit-empty"],
+        capture_output=True, text=True,
+    ).returncode == 0
+
+
 def tmux(*args: str) -> subprocess.CompletedProcess:
+    if args and args[0] in _STARTS_SERVER and not tmux_server_alive():
+        msg = ("refusing to run `tmux " + args[0] + "`: no tmux server is "
+               "answering. Starting one here would put the session inside the "
+               "container, away from the host's claude binary and working "
+               "directories. Check tmux-server.service on the host.")
+        logging.error(msg)
+        # Shaped like a real failure so every caller's existing returncode /
+        # stderr handling reports it instead of silently doing the wrong thing.
+        return subprocess.CompletedProcess(args, 1, "", msg)
     return subprocess.run(["tmux", *args], capture_output=True, text=True)
 
 

@@ -1,0 +1,14 @@
+# The build only needs requirements.txt; the app itself is bind-mounted.
+.venv
+.git
+__pycache__
+certs
+docs
+public
+sandbox
+node_modules
+*.json
+.env*
+.secret
+server.py
+README.md
