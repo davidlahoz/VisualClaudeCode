@@ -1,0 +1,55 @@
+# Independent compose project -- shares nothing with sibling project.
+name: visualclaude
+
+services:
+  visualclaude:
+    build: .
+    image: visualclaude
+    container_name: visualclaude
+    restart: unless-stopped
+
+    # server.py runs as PID 1, and PID 1 inherits every orphan in the container.
+    # tmux servers, `claude` and the shells they spawn all daemonise or get
+    # reparented, so when they exit they need someone to wait() on them --
+    # server.py never does, and they pile up as unreapable <defunct> entries.
+    # tini (docker's init) reaps them. Without this the only way to clear an
+    # accumulated zombie is to recreate the container.
+    init: true
+
+    # Same address the systemd unit bound: loopback only. The Cloudflare Tunnel
+    # connector reaches it at 127.0.0.1:7788 and nothing else can, which keeps
+    # the host's default-deny posture intact.
+    ports:
+      - "127.0.0.1:7788:7788"
+
+    env_file: .env
+    environment:
+      # .env sets VC_HOST=127.0.0.1, which was right for a host process but
+      # would bind the container's own loopback here -- unreachable from the
+      # published port. `environment` overrides `env_file` in compose.
+      VC_HOST: "0.0.0.0"
+      HOME: /root
+
+    # Every bind is at an IDENTICAL path on both sides, which is load-bearing:
+    # server.py builds `docker run -v <hostpath>:...` strings for sandbox
+    # sessions, and those are resolved by the HOST daemon via the mounted
+    # socket. A remapped path here would produce mounts that silently point at
+    # the wrong place (or get created as empty dirs) on the host.
+    volumes:
+      # Application code and all runtime state (users.json, sessions.json,
+      # settings.json, resurrect.json, .secret) -- BASE = Path(__file__).parent.
+      - /opt/visualclaude/VisualClaudeCode:/opt/visualclaude/VisualClaudeCode
+      # SANDBOX_ROOT: per-session workspaces that get mounted into sandbox
+      # containers as /work.
+      - /srv/visualclaude:/srv/visualclaude
+      # HOST_CREDS (~/.claude/.credentials.json) plus the working directories
+      # sessions are opened against.
+      - /root:/root
+      # The host tmux server's socket. tmux here is a client only; session
+      # processes keep running on the host, as they did before.
+      - /tmp/tmux-0:/tmp/tmux-0
+      # For `docker rm -f` of sandbox containers. Note: root-equivalent access
+      # to the host. This container is not a security boundary.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    working_dir: /opt/visualclaude/VisualClaudeCode
