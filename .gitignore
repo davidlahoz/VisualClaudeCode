@@ -11,3 +11,8 @@ sessions.json
 settings.json
 resurrect.json
 .env
+# .env backups written by the provisioning script (.env.bak.<epoch>) hold live
+# secrets -- CLOUDFLARE_API_TOKEN among them -- and the bare `.env` rule above
+# does not match them, so `git add -A` would have committed one.
+.env.*
+!.env.example
