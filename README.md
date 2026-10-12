@@ -5,6 +5,29 @@ session (named `vc-<name>`) running `claude`, so conversations stay alive when
 you close the browser; the web UI is just a live view (PTY → WebSocket →
 xterm.js) that attaches/detaches.
 
+## Shared Anthropic subscription & Terms of Service (READ THIS)
+
+Every session runs the `claude` CLI under **one** Anthropic account — the host
+account whose OAuth credentials live in `~/.claude/.credentials.json`, which are
+seeded into each session at start (for sandboxed users, copied into their
+container). This is by design: it lets several people — admins **and ordinary,
+non-admin users** allowed in by the Access policy (or local accounts in legacy
+mode) — share a single Claude subscription through this one deployment.
+
+**This may put you in breach of Anthropic's Terms.** Anthropic's Consumer Terms
+and Usage Policies tie a subscription (e.g. Pro/Max) to an individual and
+restrict sharing account access or credentials. Letting multiple distinct people
+drive Claude through one shared account may violate those terms and could lead to
+suspension of the underlying account. Business/Team plans and the API have their
+own seat/usage rules — check what applies to you.
+
+Whether to enable multi-user access is **entirely the decision and
+responsibility of whoever deploys and operates this software.** It is provided
+as-is, without warranty; the authors and contributors accept no liability for any
+consequences of its use — including account suspension or any violation of
+third-party terms (see [LICENSE](LICENSE)). Use at your own risk. If in doubt,
+give each person their own Anthropic account or API key instead of sharing one.
+
 ## Access
 
 - URL: **https://vcc.example.com** — published via a Cloudflare Tunnel
@@ -76,6 +99,14 @@ provisioning needs this script.
 - **New session**: pick a name, optionally a working directory (default `~`) and
   extra `claude` args (e.g. `--continue` to resume the last conversation in
   that directory).
+- **Permission mode**: a dropdown on session create sets Claude Code's
+  `--permission-mode`. Recent Claude Code versions default to **auto** (Claude
+  runs edits/commands with background safety checks instead of prompting), so
+  that is the default option; pick **manual** to be prompted for each action,
+  or `acceptEdits` / `plan`. The choice is preserved across reboot restores.
+  Note the permission mode is *not* a security boundary — it only changes
+  prompting; sandboxed users are confined by docker and non-sandboxed sessions
+  already have host shell access regardless of mode.
 - Green dot = someone is attached. Closing the tab only detaches — the session
   keeps running. `✕` kills the tmux session (the conversation itself remains
   resumable with `claude --continue` in that directory).
@@ -128,6 +159,10 @@ with vendored xterm.js in `public/vendor/`. Host/port overridable via
 - A session gives shell access as the host user (Claude sessions drop to bash
   on exit) unless the user is sandboxed — so admin (`VCC_ADMIN_EMAILS`) and
   the Access allow-list are the security boundary; guard both.
+- Every allowed user — admin or not — runs Claude under the one shared host
+  Anthropic account, which may breach Anthropic's Terms; enabling multi-user
+  access is the operator's own decision and liability. See
+  [Shared Anthropic subscription & Terms of Service](#shared-anthropic-subscription--terms-of-service-read-this).
 
 ## License
 
