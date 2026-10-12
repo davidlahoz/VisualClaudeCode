@@ -112,6 +112,12 @@ def is_admin(user: str) -> bool:
 
 
 MODELS = ("sonnet", "opus", "haiku")
+# Claude Code permission modes selectable per session. Empty = don't pass
+# --permission-mode, so Claude uses its own built-in default (which is "auto"
+# on recent versions: it runs actions with background safety checks rather than
+# prompting). We allowlist only the safe, bounded modes; "bypassPermissions"
+# and "dontAsk" are deliberately excluded from the dropdown.
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto")
 SANDBOX_IMAGE = "visualclaudecode-sandbox"
 SANDBOX_ROOT = Path("/srv/visualclaude")
 HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
@@ -1166,8 +1172,13 @@ async def create_session(request):
     name = str(body.get("name", "")).strip()
     cwd = str(body.get("cwd", "")).strip()
     extra = str(body.get("args", "")).strip()  # e.g. --continue
+    mode = str(body.get("mode", "")).strip()    # claude permission mode
     if not valid_name(name):
         raise web.HTTPBadRequest(text="name must be alphanumeric/-/_ (max 40)")
+    if mode and mode not in PERMISSION_MODES:
+        raise web.HTTPBadRequest(
+            text=f"permission mode must be one of {', '.join(PERMISSION_MODES)} "
+                 "or empty")
     prefs = user_prefs(load_users(), user)
     if extra and not prefs["allow_args"]:
         raise web.HTTPForbidden(text="claude args are not allowed for your account")
@@ -1183,6 +1194,8 @@ async def create_session(request):
     base_cmd = "claude"
     if prefs["model"]:
         base_cmd += f" --model {shlex.quote(prefs['model'])}"
+    if mode:
+        base_cmd += f" --permission-mode {shlex.quote(mode)}"
     tokens = shlex.split(extra) if extra else []
     if tokens:
         base_cmd += " " + " ".join(shlex.quote(a) for a in tokens)

@@ -49,13 +49,15 @@ main{flex:1;display:flex;min-height:0}
 .sess .x:hover{color:var(--red)}
 #newform{padding:10px;border-top:1px solid var(--border);display:flex;
   flex-direction:column;gap:6px}
-#newform input{background:var(--panel);border:1px solid var(--border);border-radius:6px;
-  padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;width:100%}
-#newform input:focus{outline:none;border-color:var(--accent)}
+#newform input,#newform select{background:var(--panel);border:1px solid var(--border);
+  border-radius:6px;padding:7px 9px;color:var(--fg);font:inherit;font-size:13px;width:100%}
+#newform input:focus,#newform select:focus{outline:none;border-color:var(--accent)}
 #newform button{background:var(--accent);color:#1a1915;border:none;border-radius:6px;
   padding:8px;font:inherit;font-weight:600;cursor:pointer}
 #newform button:hover{filter:brightness(1.1)}
 #newerr{color:var(--red);font-size:12px;min-height:0;white-space:pre-wrap}
+#newnote{color:var(--dim);font-size:11px;line-height:1.5}
+#newnote b{color:var(--accent)}
 /* terminal area */
 #termwrap{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 #term{flex:1;min-height:0;padding:6px 0 0 8px;background:var(--bg)}
@@ -165,6 +167,15 @@ main{flex:1;display:flex;min-height:0}
       <input id="f-name" placeholder="name (e.g. myproject)" autocomplete="off">
       <input id="f-cwd" placeholder="directory (created if missing, default ~)" autocomplete="off">
       <input id="f-args" placeholder="claude args (e.g. --continue)" autocomplete="off">
+      <select id="f-mode" title="Claude Code permission mode for this session">
+        <option value="">permission: auto (Claude default)</option>
+        <option value="default">permission: manual — prompt each action</option>
+        <option value="acceptEdits">permission: accept edits</option>
+        <option value="plan">permission: plan (read-only)</option>
+      </select>
+      <div id="newnote">⚠ New sessions default to Claude Code <b>auto</b> mode —
+        Claude runs edits &amp; commands with background safety checks instead of
+        asking first. Pick <b>manual</b> above to prompt for each action.</div>
       <button>+ New session</button>
       <div id="newerr"></div>
     </form>
@@ -346,7 +357,8 @@ $("#newform").onsubmit = async ev => {
   ev.preventDefault();
   $("#newerr").textContent = "";
   const name = $("#f-name").value.trim() || "claude-" + Math.random().toString(36).slice(2,6);
-  const body = { name, cwd: $("#f-cwd").value.trim(), args: $("#f-args").value.trim() };
+  const body = { name, cwd: $("#f-cwd").value.trim(), args: $("#f-args").value.trim(),
+    mode: $("#f-mode").value };
   const r = await fetch("/api/sessions", {method:"POST",
     headers:{"content-type":"application/json"}, body: JSON.stringify(body)});
   if(!r.ok){ $("#newerr").textContent = await r.text(); return; }
